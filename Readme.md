@@ -7,6 +7,7 @@ Most HTML-to-PPTX libraries fail when faced with modern web design. They break o
 **dom-to-pptx** is different. It is a **Coordinate Scraper & Style Engine** that traverses your DOM, calculates the exact computed styles of every element (Flexbox/Grid positions, complex gradients, shadows), and mathematically maps them to native PowerPoint shapes and text boxes. The result is a fully editable, vector-sharp presentation that looks exactly like your web view.
 
 ### 🛠️ Updates in v1.1.4
+
 - **Tailwind CSS v4 Support** (oklch colors)
 - **Text Gradient Fallback**
 - **List Customization & Layout fixes**
@@ -271,15 +272,16 @@ Returns: `Promise<Blob>` - Resolves with the generated PPTX file data (Blob).
 
 **Options Object:**
 
-| Key              | Type      | Default         | Description                                                                                              |
-| :--------------- | :-------- | :-------------- | :------------------------------------------------------------------------------------------------------- |
-| `fileName`       | `string`  | `"export.pptx"` | The name of the downloaded file.                                                                         |
-| `autoEmbedFonts` | `boolean` | `true`          | Automatically detect and embed used fonts.                                                               |
-| `fonts`          | `Array`   | `[]`            | Manual array of font objects: `{ name, url }`.                                                           |
-| `skipDownload`   | `boolean` | `false`         | If `true`, the file is not downloaded automatically. Use the returned `Blob` for custom handling (upload). |
+| Key              | Type      | Default         | Description                                                                                                   |
+| :--------------- | :-------- | :-------------- | :------------------------------------------------------------------------------------------------------------ |
+| `fileName`       | `string`  | `"export.pptx"` | The name of the downloaded file.                                                                              |
+| `autoEmbedFonts` | `boolean` | `true`          | Automatically detect and embed used fonts.                                                                    |
+| `fonts`          | `Array`   | `[]`            | Manual array of font objects: `{ name, url }`.                                                                |
+| `skipDownload`   | `boolean` | `false`         | If `true`, the file is not downloaded automatically. Use the returned `Blob` for custom handling (upload).    |
 | `listConfig`     | `object`  | `undefined`     | Global overrides for list styles. Structure: `{ color: string, spacing: { before: number, after: number } }`. |
 
 **List Configuration Example:**
+
 ```javascript
 listConfig: {
   spacing: {

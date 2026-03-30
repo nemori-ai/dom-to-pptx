@@ -68,11 +68,13 @@
     "events": "^3.3.0",
     "prettier": "^3.7.3",
     "process": "^0.11.10",
+    "rollup": "^4.60.1",
     "rollup-plugin-polyfill-node": "^0.10.1",
     "stream-browserify": "^3.0.0",
     "util": "^0.12.5"
   },
   "dependencies": {
+    "@zumer/snapdom": "^2.7.0",
     "fonteditor-core": "^2.6.3",
     "html2canvas": "^1.4.1",
     "jszip": "^3.10.1",

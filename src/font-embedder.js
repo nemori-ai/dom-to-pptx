@@ -1,40 +1,38 @@
 // src/font-embedder.js
-import opentype from 'opentype.js';
 import { fontToEot } from './font-utils.js';
-
-const START_RID = 201314;
 
 export class PPTXEmbedFonts {
   constructor() {
     this.zip = null;
-    this.rId = START_RID;
-    this.fonts = []; // { name, data, rid }
+    this.nextRId = 1;
+    this.fonts = [];
   }
 
   async loadZip(zip) {
     this.zip = zip;
+    await this._scanExistingRIds();
   }
 
-  /**
-   * Reads the font name from the buffer using opentype.js
-   */
-  getFontInfo(fontBuffer) {
-    try {
-      const font = opentype.parse(fontBuffer);
-      const names = font.names;
-      // Prefer English name, fallback to others
-      const fontFamily = names.fontFamily.en || Object.values(names.fontFamily)[0];
-      return { name: fontFamily };
-    } catch (e) {
-      console.warn('Could not parse font info', e);
-      return { name: 'Unknown' };
+  async _scanExistingRIds() {
+    const relsFile = this.zip.file('ppt/_rels/presentation.xml.rels');
+    if (!relsFile) return;
+
+    const xmlStr = await relsFile.async('string');
+    const rIdPattern = /Id="rId(\d+)"/g;
+    let match;
+    let maxId = 0;
+
+    while ((match = rIdPattern.exec(xmlStr)) !== null) {
+      const id = parseInt(match[1], 10);
+      if (id > maxId) maxId = id;
     }
+
+    this.nextRId = maxId + 1;
   }
 
-  async addFont(fontFace, fontBuffer, type) {
-    // Convert to EOT/fntdata for PPTX compatibility
-    const eotData = await fontToEot(type, fontBuffer);
-    const rid = this.rId++;
+  async addFont(fontFace, fontBuffer, type, opts = {}) {
+    const eotData = await fontToEot(type, fontBuffer, opts);
+    const rid = this.nextRId++;
     this.fonts.push({ name: fontFace, data: eotData, rid });
   }
 

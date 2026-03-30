@@ -1,12 +1,86 @@
 // src/image-processor.js
 
+/**
+ * Apply border-radius mask to canvas content
+ * @param {string} dataUrl - The canvas data URL
+ * @param {number} targetW - Target width in pixels
+ * @param {number} targetH - Target height in pixels
+ * @param {Object} radius - Border radius object { tl, tr, br, bl }
+ * @param {number} imageScale - Scale factor for output resolution (default: 2)
+ * @returns {Promise<string|null>} - Masked image data URL or null on failure
+ */
+export async function applyCanvasMask(dataUrl, targetW, targetH, radius, imageScale = 2) {
+  return new Promise((resolve) => {
+    const img = new Image();
+
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const scale = imageScale;
+      canvas.width = targetW * scale;
+      canvas.height = targetH * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(scale, scale);
+
+      // Normalize radius
+      let r = { tl: 0, tr: 0, br: 0, bl: 0 };
+      if (typeof radius === 'number') {
+        r = { tl: radius, tr: radius, br: radius, bl: radius };
+      } else if (typeof radius === 'object' && radius !== null) {
+        r = { ...r, ...radius };
+      }
+
+      // Clamp radius to prevent overlap
+      const factor = Math.min(
+        targetW / (r.tl + r.tr) || Infinity,
+        targetH / (r.tr + r.br) || Infinity,
+        targetW / (r.br + r.bl) || Infinity,
+        targetH / (r.bl + r.tl) || Infinity
+      );
+
+      if (factor < 1) {
+        r.tl *= factor;
+        r.tr *= factor;
+        r.br *= factor;
+        r.bl *= factor;
+      }
+
+      // 1. Draw rounded rectangle mask
+      ctx.beginPath();
+      ctx.moveTo(r.tl, 0);
+      ctx.lineTo(targetW - r.tr, 0);
+      ctx.arcTo(targetW, 0, targetW, r.tr, r.tr);
+      ctx.lineTo(targetW, targetH - r.br);
+      ctx.arcTo(targetW, targetH, targetW - r.br, targetH, r.br);
+      ctx.lineTo(r.bl, targetH);
+      ctx.arcTo(0, targetH, 0, targetH - r.bl, r.bl);
+      ctx.lineTo(0, r.tl);
+      ctx.arcTo(0, 0, r.tl, 0, r.tl);
+      ctx.closePath();
+      ctx.fillStyle = '#000';
+      ctx.fill();
+
+      // 2. Apply source-in composite to clip the image
+      ctx.globalCompositeOperation = 'source-in';
+
+      // 3. Draw the original canvas content
+      ctx.drawImage(img, 0, 0, targetW, targetH);
+
+      resolve(canvas.toDataURL('image/png'));
+    };
+
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
 export async function getProcessedImage(
   src,
   targetW,
   targetH,
   radius,
   objectFit = 'fill',
-  objectPosition = '50% 50%'
+  objectPosition = '50% 50%',
+  imageScale = 2
 ) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -14,7 +88,7 @@ export async function getProcessedImage(
 
     img.onload = () => {
       const canvas = document.createElement('canvas');
-      const scale = 2; // Double resolution
+      const scale = imageScale;
       canvas.width = targetW * scale;
       canvas.height = targetH * scale;
       const ctx = canvas.getContext('2d');

@@ -1,35 +1,29 @@
 // src/index.js
 import * as PptxGenJSImport from 'pptxgenjs';
-import html2canvas from 'html2canvas';
 import { PPTXEmbedFonts } from './font-embedder.js';
 import JSZip from 'jszip';
+import { postProcessDualFonts } from './dual-font-processor.js';
 
 // Normalize import
 const PptxGenJS = PptxGenJSImport?.default ?? PptxGenJSImport;
 
 import {
-  parseColor,
-  getTextStyle,
-  isTextContainer,
-  getVisibleShadow,
-  generateGradientSVG,
-  getRotation,
-  svgToPng,
-  getPadding,
-  getSoftEdges,
-  generateBlurredSVG,
-  getBorderInfo,
-  generateCompositeBorderSVG,
-  isClippedByParent,
-  generateCustomShapeSVG,
   getUsedFontFamilies,
   getAutoDetectedFonts,
-  extractTableData
-} from './utils.js';
-import { getProcessedImage } from './image-processor.js';
-
-const PPI = 96;
-const PX_TO_INCH = 1 / PPI;
+  resolveImageScale,
+  isFullyClipped,
+  parseColor,
+  generateGradientSVG,
+  buildStackChain,
+  compareItems,
+} from './utils/index.js';
+import {
+  RendererFactory,
+  captureBackgroundSnapshot,
+  setConcurrencyLimit,
+  resetConcurrency,
+} from './renderers/index.js';
+import { PX_TO_INCH, SLIDE_WIDTH_INCHES, SLIDE_HEIGHT_INCHES } from './utils/constants.js';
 
 /**
  * Main export function.
@@ -38,9 +32,12 @@ const PX_TO_INCH = 1 / PPI;
  * @param {string} [options.fileName]
  * @param {boolean} [options.skipDownload=false] - If true, prevents automatic download
  * @param {Object} [options.listConfig] - Config for bullets
+ * @param {number|Object} [options.imageScale] - Scale factor for image quality
  * @returns {Promise<Blob>} - Returns the generated PPTX Blob
  */
 export async function exportToPptx(target, options = {}) {
+  const opts = { autoEmbedFonts: true, ...options };
+  const imageScaleConfig = resolveImageScale(opts.imageScale);
   const resolvePptxConstructor = (pkg) => {
     if (!pkg) return null;
     if (typeof pkg === 'function') return pkg;
@@ -54,7 +51,12 @@ export async function exportToPptx(target, options = {}) {
   const PptxConstructor = resolvePptxConstructor(PptxGenJS);
   if (!PptxConstructor) throw new Error('PptxGenJS constructor not found.');
   const pptx = new PptxConstructor();
-  pptx.layout = 'LAYOUT_16x9';
+  pptx.defineLayout({
+    name: 'LAYOUT_16x9_MODERN',
+    width: SLIDE_WIDTH_INCHES,
+    height: SLIDE_HEIGHT_INCHES,
+  });
+  pptx.layout = 'LAYOUT_16x9_MODERN';
 
   const elements = Array.isArray(target) ? target : [target];
 
@@ -65,14 +67,13 @@ export async function exportToPptx(target, options = {}) {
       continue;
     }
     const slide = pptx.addSlide();
-    await processSlide(root, slide, pptx, options);
+    await processSlide(root, slide, pptx, { ...opts, imageScaleConfig });
   }
 
-  // 3. Font Embedding Logic
   let finalBlob;
-  let fontsToEmbed = options.fonts || [];
+  let fontsToEmbed = opts.fonts || [];
 
-  if (options.autoEmbedFonts) {
+  if (opts.autoEmbedFonts) {
     // A. Scan DOM for used font families
     const usedFamilies = getUsedFontFamilies(elements);
 
@@ -104,21 +105,28 @@ export async function exportToPptx(target, options = {}) {
     const embedder = new PPTXEmbedFonts();
     await embedder.loadZip(zip);
 
-    // Fetch and Embed
-    for (const fontCfg of fontsToEmbed) {
-      try {
-        const response = await fetch(fontCfg.url);
-        if (!response.ok) throw new Error(`Failed to fetch ${fontCfg.url}`);
-        const buffer = await response.arrayBuffer();
-
-        // Infer type
-        const ext = fontCfg.url.split('.').pop().split(/[?#]/)[0].toLowerCase();
-        let type = 'ttf';
-        if (['woff', 'otf'].includes(ext)) type = ext;
-
-        await embedder.addFont(fontCfg.name, buffer, type);
-      } catch (e) {
-        console.warn(`Failed to embed font: ${fontCfg.name} (${fontCfg.url})`, e);
+    // Fetch all fonts in parallel, then embed sequentially (XML manipulation is not concurrent-safe)
+    const fontDataArr = await Promise.all(
+      fontsToEmbed.map(async (fontCfg) => {
+        try {
+          const ext = fontCfg.url.split('.').pop().split(/[?#]/)[0].toLowerCase();
+          const response = await fetch(fontCfg.url);
+          if (!response.ok) throw new Error(`Failed to fetch ${fontCfg.url}`);
+          const buffer = await response.arrayBuffer();
+          let type = 'ttf';
+          if (['woff', 'woff2', 'otf'].includes(ext)) type = ext;
+          return { name: fontCfg.name, buffer, type };
+        } catch (e) {
+          console.warn(`Failed to fetch font: ${fontCfg.name} (${fontCfg.url})`, e);
+          return null;
+        }
+      })
+    );
+    for (const fontData of fontDataArr) {
+      if (fontData) {
+        await embedder.addFont(fontData.name, fontData.buffer, fontData.type, {
+          woff2WasmUrl: opts.woff2WasmUrl,
+        });
       }
     }
 
@@ -129,10 +137,13 @@ export async function exportToPptx(target, options = {}) {
     finalBlob = await pptx.write({ outputType: 'blob' });
   }
 
+  // 5. Post-process: Handle dual-font (Latin + EA) fontFace JSON strings
+  finalBlob = await postProcessDualFonts(finalBlob);
+
   // 4. Output Handling
   // If skipDownload is NOT true, proceed with browser download
-  if (!options.skipDownload) {
-    const fileName = options.fileName || 'export.pptx';
+  if (!opts.skipDownload) {
+    const fileName = opts.fileName || 'export.pptx';
     const url = URL.createObjectURL(finalBlob);
     const a = document.createElement('a');
     a.href = url;
@@ -147,6 +158,46 @@ export async function exportToPptx(target, options = {}) {
   return finalBlob;
 }
 
+async function fetchImageAsBase64(url, targetW, targetH) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'Anonymous';
+
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+
+      const imgAspect = img.naturalWidth / img.naturalHeight;
+      const targetAspect = targetW / targetH;
+
+      let sx = 0,
+        sy = 0,
+        sw = img.naturalWidth,
+        sh = img.naturalHeight;
+
+      if (imgAspect > targetAspect) {
+        sw = img.naturalHeight * targetAspect;
+        sx = (img.naturalWidth - sw) / 2;
+      } else {
+        sh = img.naturalWidth / targetAspect;
+        sy = (img.naturalHeight - sh) / 2;
+      }
+
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, targetW, targetH);
+      resolve(canvas.toDataURL('image/png'));
+    };
+
+    img.onerror = () => {
+      console.warn('[dom-to-pptx] Failed to load background image:', url);
+      resolve(null);
+    };
+
+    img.src = url;
+  });
+}
+
 /**
  * Worker function to process a single DOM element into a single PPTX slide.
  * @param {HTMLElement} root - The root element for this slide.
@@ -154,9 +205,71 @@ export async function exportToPptx(target, options = {}) {
  * @param {PptxGenJS} pptx - The main PPTX instance.
  */
 async function processSlide(root, slide, pptx, globalOptions = {}) {
+  // Reset concurrency state from any previous (possibly failed) export
+  resetConcurrency();
+  // Apply user-configured concurrency limit (default: 4)
+  if (globalOptions.concurrency) setConcurrencyLimit(globalOptions.concurrency);
+
+  // Ensure root acts as containing block for absolute children.
+  // Without this, absolute elements may reference the viewport instead of root,
+  // causing size mismatches when body width differs from viewport width.
+  const origPosition = root.style.position;
+  const rootPosition = window.getComputedStyle(root).position;
+  if (rootPosition === 'static') {
+    root.style.position = 'relative';
+  }
+
   const rootRect = root.getBoundingClientRect();
-  const PPTX_WIDTH_IN = 10;
-  const PPTX_HEIGHT_IN = 5.625;
+  const PPTX_WIDTH_IN = SLIDE_WIDTH_INCHES;
+  const PPTX_HEIGHT_IN = SLIDE_HEIGHT_INCHES;
+
+  // Capture background snapshot for accurate color sampling (handles images, gradients, etc.)
+  const backgroundSnapshot = await captureBackgroundSnapshot(root);
+  globalOptions.backgroundSnapshot = backgroundSnapshot;
+
+  // --- Set slide background from root element ---
+  const rootStyle = window.getComputedStyle(root);
+  const bgImage = rootStyle.backgroundImage;
+  const bgColor = parseColor(rootStyle.backgroundColor);
+
+  // Check if background is a tiled/pattern gradient (e.g., grid lines with custom backgroundSize)
+  // Tiled gradients can't be represented as PPTX slide backgrounds, so use solid color instead.
+  const rootBgSize = rootStyle.backgroundSize || '';
+  const isRootTiledGradient =
+    bgImage &&
+    bgImage.includes('gradient') &&
+    rootBgSize !== '' &&
+    rootBgSize !== 'auto' &&
+    rootBgSize !== 'cover' &&
+    rootBgSize !== 'contain' &&
+    !rootBgSize.includes('100%');
+
+  if (bgImage && bgImage !== 'none' && bgImage.includes('gradient') && !isRootTiledGradient) {
+    // Gradient background → convert to SVG image
+    const svgData = generateGradientSVG(rootRect.width, rootRect.height, bgImage, 0, null);
+    if (svgData) {
+      slide.background = { data: svgData };
+    }
+  } else if (bgImage && bgImage !== 'none' && bgImage.includes('url(')) {
+    // URL background image → fetch and convert to base64
+    const urlMatch = bgImage.match(/url\(["']?([^"')]+)["']?\)/);
+    if (urlMatch && urlMatch[1]) {
+      try {
+        const imgUrl = urlMatch[1];
+        const bgImageData = await fetchImageAsBase64(imgUrl, rootRect.width, rootRect.height);
+        if (bgImageData) {
+          slide.background = { data: bgImageData };
+        }
+      } catch (e) {
+        console.warn('[dom-to-pptx] Failed to load background image:', e);
+      }
+    }
+  }
+  // Fallback to solid background color if no background was set
+  // (e.g., multi-gradient grid patterns that generateGradientSVG cannot handle)
+  if (!slide.background && bgColor.hex && bgColor.opacity > 0) {
+    slide.background = { color: bgColor.hex };
+  }
 
   const contentWidthIn = rootRect.width * PX_TO_INCH;
   const contentHeightIn = rootRect.height * PX_TO_INCH;
@@ -174,17 +287,16 @@ async function processSlide(root, slide, pptx, globalOptions = {}) {
   const asyncTasks = []; // Queue for heavy operations (Images, Canvas)
   let domOrderCounter = 0;
 
-  // Sync Traversal Function
-  function collect(node, parentZIndex) {
+  async function collect(node, parentStackChain, parentDisplay, parentOpacity) {
     const order = domOrderCounter++;
 
-    let currentZ = parentZIndex;
+    let currentStackChain = parentStackChain;
     let nodeStyle = null;
     const nodeType = node.nodeType;
+    let accumulatedOpacity = parentOpacity;
 
     if (nodeType === 1) {
       nodeStyle = window.getComputedStyle(node);
-      // Optimization: Skip completely hidden elements immediately
       if (
         nodeStyle.display === 'none' ||
         nodeStyle.visibility === 'hidden' ||
@@ -192,43 +304,52 @@ async function processSlide(root, slide, pptx, globalOptions = {}) {
       ) {
         return;
       }
-      if (nodeStyle.zIndex !== 'auto') {
-        currentZ = parseInt(nodeStyle.zIndex);
+      if (isFullyClipped(node)) {
+        return;
       }
+
+      const ownOpacity = parseFloat(nodeStyle.opacity);
+      if (!isNaN(ownOpacity) && ownOpacity !== 1) {
+        accumulatedOpacity *= ownOpacity;
+      }
+
+      const styleWithParent = { ...nodeStyle, _parentDisplay: parentDisplay };
+      currentStackChain = buildStackChain(parentStackChain, styleWithParent, order);
     }
 
-    // Prepare the item. If it needs async work, it returns a 'job'
-    const result = prepareRenderItem(
+    const renderer = RendererFactory.create({
       node,
-      { ...layoutConfig, root },
-      order,
+      config: { ...layoutConfig, root, accumulatedOpacity },
+      domOrder: order,
       pptx,
-      currentZ,
-      nodeStyle,
-      globalOptions
-    );
+      stackChain: currentStackChain,
+      style: nodeStyle,
+      globalOptions,
+    });
+
+    const result = renderer ? await renderer.render() : null;
 
     if (result) {
       if (result.items) {
-        // Push items immediately to queue (data might be missing but filled later)
+        for (const item of result.items) {
+          item.stackChain = currentStackChain;
+        }
         renderQueue.push(...result.items);
       }
       if (result.job) {
-        // Push the promise-returning function to the task list
         asyncTasks.push(result.job);
       }
       if (result.stopRecursion) return;
     }
 
-    // Recurse children synchronously
     const childNodes = node.childNodes;
+    const currentDisplay = nodeStyle ? nodeStyle.display : parentDisplay;
     for (let i = 0; i < childNodes.length; i++) {
-      collect(childNodes[i], currentZ);
+      await collect(childNodes[i], currentStackChain, currentDisplay, accumulatedOpacity);
     }
   }
 
-  // 1. Traverse and build the structure (Fast)
-  collect(root, 0);
+  await collect(root, [], null, 1);
 
   // 2. Execute all heavy tasks in parallel (Fast)
   if (asyncTasks.length > 0) {
@@ -241,10 +362,7 @@ async function processSlide(root, slide, pptx, globalOptions = {}) {
     (item) => !item.skip && (item.type !== 'image' || item.options.data)
   );
 
-  finalQueue.sort((a, b) => {
-    if (a.zIndex !== b.zIndex) return a.zIndex - b.zIndex;
-    return a.domOrder - b.domOrder;
-  });
+  finalQueue.sort(compareItems);
 
   // 4. Add to Slide
   for (const item of finalQueue) {
@@ -256,1061 +374,16 @@ async function processSlide(root, slide, pptx, globalOptions = {}) {
         x: item.options.x,
         y: item.options.y,
         w: item.options.w,
-        colW: item.tableData.colWidths, // Essential for correct layout
+        colW: item.tableData.colWidths,
+        rowH: item.tableData.rowHeights,
         autoPage: false,
-        // Remove default table styles so our extracted CSS applies cleanly
-        border: { type: "none" },
-        fill: { color: "FFFFFF", transparency: 100 }
+        border: { type: 'none' },
+        fill: { color: 'FFFFFF', transparency: 100 },
       });
     }
   }
-}
 
-/**
- * Optimized html2canvas wrapper
- * Includes fix for cropped icons by adjusting styles in the cloned document.
- */
-async function elementToCanvasImage(node, widthPx, heightPx) {
-  return new Promise((resolve) => {
-    // 1. Assign a temp ID to locate the node inside the cloned document
-    const originalId = node.id;
-    const tempId = 'pptx-capture-' + Math.random().toString(36).substr(2, 9);
-    node.id = tempId;
-
-    const width = Math.max(Math.ceil(widthPx), 1);
-    const height = Math.max(Math.ceil(heightPx), 1);
-    const style = window.getComputedStyle(node);
-
-    html2canvas(node, {
-      backgroundColor: null,
-      logging: false,
-      scale: 3, // Higher scale for sharper icons
-      useCORS: true, // critical for external fonts/images
-      onclone: (clonedDoc) => {
-        const clonedNode = clonedDoc.getElementById(tempId);
-        if (clonedNode) {
-          // --- FIX: PREVENT ICON CLIPPING ---
-          // 1. Force overflow visible so glyphs bleeding out aren't cut
-          clonedNode.style.overflow = 'visible';
-
-          // 2. Adjust alignment for Icons to prevent baseline clipping
-          // (Applies to <i>, <span>, or standard icon classes)
-          const tag = clonedNode.tagName;
-          if (tag === 'I' || tag === 'SPAN' || clonedNode.className.includes('fa-')) {
-            // Flex center helps align the glyph exactly in the middle of the box
-            // preventing top/bottom cropping due to line-height mismatches.
-            clonedNode.style.display = 'inline-flex';
-            clonedNode.style.justifyContent = 'center';
-            clonedNode.style.alignItems = 'center';
-
-            // Remove margins that might offset the capture
-            clonedNode.style.margin = '0';
-
-            // Ensure the font fits
-            clonedNode.style.lineHeight = '1';
-            clonedNode.style.verticalAlign = 'middle';
-          }
-        }
-      },
-    })
-      .then((canvas) => {
-        // Restore the original ID
-        if (originalId) node.id = originalId;
-        else node.removeAttribute('id');
-
-        const destCanvas = document.createElement('canvas');
-        destCanvas.width = width;
-        destCanvas.height = height;
-        const ctx = destCanvas.getContext('2d');
-
-        // Draw captured canvas.
-        // We simply draw it to fill the box. Since we centered it in 'onclone',
-        // the glyph should now be visible within the bounds.
-        ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, width, height);
-
-        // --- Border Radius Clipping (Existing Logic) ---
-        let tl = parseFloat(style.borderTopLeftRadius) || 0;
-        let tr = parseFloat(style.borderTopRightRadius) || 0;
-        let br = parseFloat(style.borderBottomRightRadius) || 0;
-        let bl = parseFloat(style.borderBottomLeftRadius) || 0;
-
-        const f = Math.min(
-          width / (tl + tr) || Infinity,
-          height / (tr + br) || Infinity,
-          width / (br + bl) || Infinity,
-          height / (bl + tl) || Infinity
-        );
-
-        if (f < 1) {
-          tl *= f;
-          tr *= f;
-          br *= f;
-          bl *= f;
-        }
-
-        if (tl + tr + br + bl > 0) {
-          ctx.globalCompositeOperation = 'destination-in';
-          ctx.beginPath();
-          ctx.moveTo(tl, 0);
-          ctx.lineTo(width - tr, 0);
-          ctx.arcTo(width, 0, width, tr, tr);
-          ctx.lineTo(width, height - br);
-          ctx.arcTo(width, height, width - br, height, br);
-          ctx.lineTo(bl, height);
-          ctx.arcTo(0, height, 0, height - bl, bl);
-          ctx.lineTo(0, tl);
-          ctx.arcTo(0, 0, tl, 0, tl);
-          ctx.closePath();
-          ctx.fill();
-        }
-
-        resolve(destCanvas.toDataURL('image/png'));
-      })
-      .catch((e) => {
-        if (originalId) node.id = originalId;
-        else node.removeAttribute('id');
-        console.warn('Canvas capture failed for node', node, e);
-        resolve(null);
-      });
-  });
-}
-
-/**
- * Helper to identify elements that should be rendered as icons (Images).
- * Detects Custom Elements AND generic tags (<i>, <span>) with icon classes/pseudo-elements.
- */
-function isIconElement(node) {
-  // 1. Custom Elements (hyphenated tags) or Explicit Library Tags
-  const tag = node.tagName.toUpperCase();
-  if (
-    tag.includes('-') ||
-    [
-      'MATERIAL-ICON',
-      'ICONIFY-ICON',
-      'REMIX-ICON',
-      'ION-ICON',
-      'EVA-ICON',
-      'BOX-ICON',
-      'FA-ICON',
-    ].includes(tag)
-  ) {
-    return true;
+  if (rootPosition === 'static') {
+    root.style.position = origPosition;
   }
-
-  // 2. Class-based Icons (FontAwesome, Bootstrap, Material symbols) on <i> or <span>
-  if (tag === 'I' || tag === 'SPAN') {
-    const cls = node.getAttribute('class') || '';
-    if (
-      typeof cls === 'string' &&
-      (cls.includes('fa-') ||
-        cls.includes('fas') ||
-        cls.includes('far') ||
-        cls.includes('fab') ||
-        cls.includes('bi-') ||
-        cls.includes('material-icons') ||
-        cls.includes('icon'))
-    ) {
-      // Double-check: Must have pseudo-element content to be a CSS icon
-      const before = window.getComputedStyle(node, '::before').content;
-      const after = window.getComputedStyle(node, '::after').content;
-      const hasContent = (c) => c && c !== 'none' && c !== 'normal' && c !== '""';
-
-      if (hasContent(before) || hasContent(after)) return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Replaces createRenderItem.
- * Returns { items: [], job: () => Promise, stopRecursion: boolean }
- */
-function prepareRenderItem(
-  node,
-  config,
-  domOrder,
-  pptx,
-  effectiveZIndex,
-  computedStyle,
-  globalOptions = {}
-) {
-  // 1. Text Node Handling
-  if (node.nodeType === 3) {
-    const textContent = node.nodeValue.trim();
-    if (!textContent) return null;
-
-    const parent = node.parentElement;
-    if (!parent) return null;
-
-    if (isTextContainer(parent)) return null; // Parent handles it
-
-    const range = document.createRange();
-    range.selectNode(node);
-    const rect = range.getBoundingClientRect();
-    range.detach();
-
-    const style = window.getComputedStyle(parent);
-    const widthPx = rect.width;
-    const heightPx = rect.height;
-    const unrotatedW = widthPx * PX_TO_INCH * config.scale;
-    const unrotatedH = heightPx * PX_TO_INCH * config.scale;
-
-    const x = config.offX + (rect.left - config.rootX) * PX_TO_INCH * config.scale;
-    const y = config.offY + (rect.top - config.rootY) * PX_TO_INCH * config.scale;
-
-    return {
-      items: [
-        {
-          type: 'text',
-          zIndex: effectiveZIndex,
-          domOrder,
-          textParts: [
-            {
-              text: textContent,
-              options: getTextStyle(style, config.scale),
-            },
-          ],
-          options: { x, y, w: unrotatedW, h: unrotatedH, margin: 0, autoFit: false },
-        },
-      ],
-      stopRecursion: false,
-    };
-  }
-
-  if (node.nodeType !== 1) return null;
-  const style = computedStyle; // Use pre-computed style
-
-  const rect = node.getBoundingClientRect();
-  if (rect.width < 0.5 || rect.height < 0.5) return null;
-
-  const zIndex = effectiveZIndex;
-  const rotation = getRotation(style.transform);
-  const elementOpacity = parseFloat(style.opacity);
-  const safeOpacity = isNaN(elementOpacity) ? 1 : elementOpacity;
-
-  const widthPx = node.offsetWidth || rect.width;
-  const heightPx = node.offsetHeight || rect.height;
-  const unrotatedW = widthPx * PX_TO_INCH * config.scale;
-  const unrotatedH = heightPx * PX_TO_INCH * config.scale;
-  const centerX = rect.left + rect.width / 2;
-  const centerY = rect.top + rect.height / 2;
-
-  let x = config.offX + (centerX - config.rootX) * PX_TO_INCH * config.scale - unrotatedW / 2;
-  let y = config.offY + (centerY - config.rootY) * PX_TO_INCH * config.scale - unrotatedH / 2;
-  let w = unrotatedW;
-  let h = unrotatedH;
-
-  const items = [];
-
-  if (node.tagName === 'TABLE') {
-    const tableData = extractTableData(node, config.scale);
-
-    // Calculate total table width to ensure X position is correct
-    // (Though x calculation above usually handles it, tables can be finicky)
-    return {
-      items: [
-        {
-          type: 'table',
-          zIndex: effectiveZIndex,
-          domOrder,
-          tableData: tableData,
-          options: { x, y, w: unrotatedW, h: unrotatedH }
-        }
-      ],
-      stopRecursion: true // Important: Don't process TR/TD as separate shapes
-    };
-  }
-
-  if ((node.tagName === 'UL' || node.tagName === 'OL') && !isComplexHierarchy(node)) {
-    const listItems = [];
-    const liChildren = Array.from(node.children).filter((c) => c.tagName === 'LI');
-
-    liChildren.forEach((child, index) => {
-      const liStyle = window.getComputedStyle(child);
-      const liRect = child.getBoundingClientRect();
-      const parentRect = node.getBoundingClientRect(); // node is UL/OL
-
-      // 1. Determine Bullet Config
-      let bullet = { type: 'bullet' };
-      const listStyleType = liStyle.listStyleType || 'disc';
-
-      if (node.tagName === 'OL' || listStyleType === 'decimal') {
-        bullet = { type: 'number' };
-      } else if (listStyleType === 'none') {
-        bullet = false;
-      } else {
-        let code = '2022'; // disc
-        if (listStyleType === 'circle') code = '25CB';
-        if (listStyleType === 'square') code = '25A0';
-
-        // --- CHANGE: Color & Size Logic (Option > ::marker > CSS color) ---
-        let finalHex = '000000';
-        let markerFontSize = null;
-
-        // A. Check Global Option override
-        if (globalOptions?.listConfig?.color) {
-          finalHex = parseColor(globalOptions.listConfig.color).hex || '000000';
-        }
-        // B. Check ::marker pseudo element (supported in modern browsers)
-        else {
-          const markerStyle = window.getComputedStyle(child, '::marker');
-          const markerColor = parseColor(markerStyle.color);
-          if (markerColor.hex) {
-            finalHex = markerColor.hex;
-          } else {
-            // C. Fallback to LI text color
-            const colorObj = parseColor(liStyle.color);
-            if (colorObj.hex) finalHex = colorObj.hex;
-          }
-
-          // Check ::marker font-size
-          const markerFs = parseFloat(markerStyle.fontSize);
-          if (!isNaN(markerFs) && markerFs > 0) {
-            // Convert px->pt for PPTX
-            markerFontSize = markerFs * 0.75 * config.scale;
-          }
-        }
-
-        bullet = { code, color: finalHex };
-        if (markerFontSize) {
-          bullet.fontSize = markerFontSize;
-        }
-      }
-
-      // 2. Calculate Dynamic Indent (Respects padding-left)
-      // Visual Indent = Distance from UL left edge to LI Content left edge.
-      // PptxGenJS 'indent' = Space between bullet and text? 
-      // Actually PptxGenJS 'indent' allows setting the hanging indent.
-      // We calculate the TOTAL visual offset from the parent container.
-      // 1 px = 0.75 pt (approx, standard DTP).
-      // We must scale it by config.scale.
-      const visualIndentPx = liRect.left - parentRect.left;
-      /*
-         Standard indent in PPT is ~27pt.
-         If visualIndentPx is small (e.g. 10px padding), we want small indent.
-         If visualIndentPx is large (40px padding), we want large indent.
-         We treat 'indent' as the value to pass to PptxGenJS.
-      */
-      const computedIndentPt = visualIndentPx * 0.75 * config.scale;
-
-      if (bullet && computedIndentPt > 0) {
-        bullet.indent = computedIndentPt;
-        // Also support custom margin between bullet and text if provided in listConfig?
-        // For now, computedIndentPt covers the visual placement.
-      }
-
-      // 3. Extract Text Parts
-      const parts = collectListParts(child, liStyle, config.scale);
-
-      if (parts.length > 0) {
-        parts.forEach((p) => {
-          if (!p.options) p.options = {};
-        });
-
-        // A. Apply Bullet
-        // Workaround: pptxgenjs bullets inherit the style of the text run they are attached to.
-        // To support ::marker styles (color, size) that differ from the text, we create
-        // a "dummy" text run at the start of the list item that carries the bullet configuration.
-        if (bullet) {
-          const firstPartInfo = parts[0].options;
-
-          // Create a dummy run. We use a Zero Width Space to ensure it's rendered but invisible.
-          // This "run" will hold the bullet and its specific color/size.
-          const bulletRun = {
-            text: '\u200B',
-            options: {
-              ...firstPartInfo, // Inherit base props (fontFace, etc.)
-              color: bullet.color || firstPartInfo.color,
-              fontSize: bullet.fontSize || firstPartInfo.fontSize,
-              bullet: bullet
-            }
-          };
-
-          // Don't duplicate transparent or empty color from firstPart if bullet has one
-          if (bullet.color) bulletRun.options.color = bullet.color;
-          if (bullet.fontSize) bulletRun.options.fontSize = bullet.fontSize;
-
-          // Prepend
-          parts.unshift(bulletRun);
-        }
-
-        // B. Apply Spacing
-        let ptBefore = 0;
-        let ptAfter = 0;
-
-        // A. Check Global Options (Expected in Points)
-        if (globalOptions.listConfig?.spacing) {
-          if (typeof globalOptions.listConfig.spacing.before === 'number') {
-            ptBefore = globalOptions.listConfig.spacing.before;
-          }
-          if (typeof globalOptions.listConfig.spacing.after === 'number') {
-            ptAfter = globalOptions.listConfig.spacing.after;
-          }
-        }
-        // B. Fallback to CSS Margins (Convert px -> pt)
-        else {
-          const mt = parseFloat(liStyle.marginTop) || 0;
-          const mb = parseFloat(liStyle.marginBottom) || 0;
-          if (mt > 0) ptBefore = mt * 0.75 * config.scale;
-          if (mb > 0) ptAfter = mb * 0.75 * config.scale;
-        }
-
-        if (ptBefore > 0) parts[0].options.paraSpaceBefore = ptBefore;
-        if (ptAfter > 0) parts[0].options.paraSpaceAfter = ptAfter;
-
-        if (index < liChildren.length - 1) {
-          parts[parts.length - 1].options.breakLine = true;
-        }
-
-        listItems.push(...parts);
-      }
-    });
-
-    if (listItems.length > 0) {
-      // Add background if exists
-      const bgColorObj = parseColor(style.backgroundColor);
-      if (bgColorObj.hex && bgColorObj.opacity > 0) {
-        items.push({
-          type: 'shape',
-          zIndex,
-          domOrder,
-          shapeType: 'rect',
-          options: { x, y, w, h, fill: { color: bgColorObj.hex } },
-        });
-      }
-
-      items.push({
-        type: 'text',
-        zIndex: zIndex + 1,
-        domOrder,
-        textParts: listItems,
-        options: {
-          x,
-          y,
-          w,
-          h,
-          align: 'left',
-          valign: 'top',
-          margin: 0,
-          autoFit: false,
-          wrap: true,
-        },
-      });
-
-      return { items, stopRecursion: true };
-    }
-  }
-
-  if (node.tagName === 'CANVAS') {
-    const item = {
-      type: 'image',
-      zIndex,
-      domOrder,
-      options: { x, y, w, h, rotate: rotation, data: null }
-    };
-
-    const job = async () => {
-      try {
-        // Direct data extraction from the canvas element
-        // This preserves the exact current state of the chart
-        const dataUrl = node.toDataURL('image/png');
-
-        // Basic validation
-        if (dataUrl && dataUrl.length > 10) {
-          item.options.data = dataUrl;
-        } else {
-          item.skip = true;
-        }
-      } catch (e) {
-        // Tainted canvas (CORS issues) will throw here
-        console.warn('Failed to capture canvas content:', e);
-        item.skip = true;
-      }
-    };
-
-    return { items: [item], job, stopRecursion: true };
-  }
-
-  // --- ASYNC JOB: SVG Tags ---
-  if (node.nodeName.toUpperCase() === 'SVG') {
-    const item = {
-      type: 'image',
-      zIndex,
-      domOrder,
-      options: { data: null, x, y, w, h, rotate: rotation },
-    };
-
-    const job = async () => {
-      const processed = await svgToPng(node);
-      if (processed) item.options.data = processed;
-      else item.skip = true;
-    };
-
-    return { items: [item], job, stopRecursion: true };
-  }
-
-  // --- ASYNC JOB: IMG Tags ---
-  if (node.tagName === 'IMG') {
-    let radii = {
-      tl: parseFloat(style.borderTopLeftRadius) || 0,
-      tr: parseFloat(style.borderTopRightRadius) || 0,
-      br: parseFloat(style.borderBottomRightRadius) || 0,
-      bl: parseFloat(style.borderBottomLeftRadius) || 0,
-    };
-
-    const hasAnyRadius = radii.tl > 0 || radii.tr > 0 || radii.br > 0 || radii.bl > 0;
-    if (!hasAnyRadius) {
-      const parent = node.parentElement;
-      const parentStyle = window.getComputedStyle(parent);
-      if (parentStyle.overflow !== 'visible') {
-        const pRadii = {
-          tl: parseFloat(parentStyle.borderTopLeftRadius) || 0,
-          tr: parseFloat(parentStyle.borderTopRightRadius) || 0,
-          br: parseFloat(parentStyle.borderBottomRightRadius) || 0,
-          bl: parseFloat(parentStyle.borderBottomLeftRadius) || 0,
-        };
-        const pRect = parent.getBoundingClientRect();
-        if (Math.abs(pRect.width - rect.width) < 5 && Math.abs(pRect.height - rect.height) < 5) {
-          radii = pRadii;
-        }
-      }
-    }
-
-    const objectFit = style.objectFit || 'fill'; // default CSS behavior is fill
-    const objectPosition = style.objectPosition || '50% 50%';
-
-    const item = {
-      type: 'image',
-      zIndex,
-      domOrder,
-      options: { x, y, w, h, rotate: rotation, data: null },
-    };
-
-    const job = async () => {
-      const processed = await getProcessedImage(
-        node.src,
-        widthPx,
-        heightPx,
-        radii,
-        objectFit,
-        objectPosition
-      );
-      if (processed) item.options.data = processed;
-      else item.skip = true;
-    };
-
-    return { items: [item], job, stopRecursion: true };
-  }
-
-  // --- ASYNC JOB: Icons and Other Elements ---
-  if (isIconElement(node)) {
-    const item = {
-      type: 'image',
-      zIndex,
-      domOrder,
-      options: { x, y, w, h, rotate: rotation, data: null },
-    };
-    const job = async () => {
-      const pngData = await elementToCanvasImage(node, widthPx, heightPx);
-      if (pngData) item.options.data = pngData;
-      else item.skip = true;
-    };
-    return { items: [item], job, stopRecursion: true };
-  }
-
-  // Radii logic
-  const borderRadiusValue = parseFloat(style.borderRadius) || 0;
-  const borderBottomLeftRadius = parseFloat(style.borderBottomLeftRadius) || 0;
-  const borderBottomRightRadius = parseFloat(style.borderBottomRightRadius) || 0;
-  const borderTopLeftRadius = parseFloat(style.borderTopLeftRadius) || 0;
-  const borderTopRightRadius = parseFloat(style.borderTopRightRadius) || 0;
-
-  const hasPartialBorderRadius =
-    (borderBottomLeftRadius > 0 && borderBottomLeftRadius !== borderRadiusValue) ||
-    (borderBottomRightRadius > 0 && borderBottomRightRadius !== borderRadiusValue) ||
-    (borderTopLeftRadius > 0 && borderTopLeftRadius !== borderRadiusValue) ||
-    (borderTopRightRadius > 0 && borderTopRightRadius !== borderRadiusValue) ||
-    (borderRadiusValue === 0 &&
-      (borderBottomLeftRadius ||
-        borderBottomRightRadius ||
-        borderTopLeftRadius ||
-        borderTopRightRadius));
-
-  // --- PRIORITY SVG: Solid Fill with Partial Border Radius (Vector Cone/Tab) ---
-  // Fix for "missing cone": Prioritize SVG vector generation over Raster Canvas for simple shapes with partial radii.
-  // This avoids html2canvas failures on empty divs.
-  const tempBg = parseColor(style.backgroundColor);
-  const isTxt = isTextContainer(node);
-
-  if (hasPartialBorderRadius && tempBg.hex && !isTxt) {
-    const shapeSvg = generateCustomShapeSVG(
-      widthPx,
-      heightPx,
-      tempBg.hex,
-      tempBg.opacity,
-      {
-        tl: parseFloat(style.borderTopLeftRadius) || 0,
-        tr: parseFloat(style.borderTopRightRadius) || 0,
-        br: parseFloat(style.borderBottomRightRadius) || 0,
-        bl: parseFloat(style.borderBottomLeftRadius) || 0,
-      }
-    );
-
-    return {
-      items: [{
-        type: 'image',
-        zIndex,
-        domOrder,
-        options: { data: shapeSvg, x, y, w, h, rotate: rotation },
-      }],
-      stopRecursion: true // Treat as leaf
-    };
-  }
-
-  // --- ASYNC JOB: Clipped Divs via Canvas ---
-  if (hasPartialBorderRadius && isClippedByParent(node)) {
-    const marginLeft = parseFloat(style.marginLeft) || 0;
-    const marginTop = parseFloat(style.marginTop) || 0;
-    x += marginLeft * PX_TO_INCH * config.scale;
-    y += marginTop * PX_TO_INCH * config.scale;
-
-    const item = {
-      type: 'image',
-      zIndex,
-      domOrder,
-      options: { x, y, w, h, rotate: rotation, data: null },
-    };
-
-    const job = async () => {
-      const canvasImageData = await elementToCanvasImage(node, widthPx, heightPx);
-      if (canvasImageData) item.options.data = canvasImageData;
-      else item.skip = true;
-    };
-
-    return { items: [item], job, stopRecursion: true };
-  }
-
-  // --- SYNC: Standard CSS Extraction ---
-  const bgColorObj = parseColor(style.backgroundColor);
-  const bgClip = style.webkitBackgroundClip || style.backgroundClip;
-  const isBgClipText = bgClip === 'text';
-  const hasGradient =
-    !isBgClipText && style.backgroundImage && style.backgroundImage.includes('linear-gradient');
-
-  const borderColorObj = parseColor(style.borderColor);
-  const borderWidth = parseFloat(style.borderWidth);
-  const hasBorder = borderWidth > 0 && borderColorObj.hex;
-
-  const borderInfo = getBorderInfo(style, config.scale);
-  const hasUniformBorder = borderInfo.type === 'uniform';
-  const hasCompositeBorder = borderInfo.type === 'composite';
-
-  const shadowStr = style.boxShadow;
-  const hasShadow = shadowStr && shadowStr !== 'none';
-  const softEdge = getSoftEdges(style.filter, config.scale);
-
-  let isImageWrapper = false;
-  const imgChild = Array.from(node.children).find((c) => c.tagName === 'IMG');
-  if (imgChild) {
-    const childW = imgChild.offsetWidth || imgChild.getBoundingClientRect().width;
-    const childH = imgChild.offsetHeight || imgChild.getBoundingClientRect().height;
-    if (childW >= widthPx - 2 && childH >= heightPx - 2) isImageWrapper = true;
-  }
-
-  let textPayload = null;
-  const isText = isTextContainer(node);
-
-  if (isText) {
-    const textParts = [];
-    let trimNextLeading = false;
-
-    node.childNodes.forEach((child, index) => {
-      // Handle <br> tags
-      if (child.tagName === 'BR') {
-        // 1. Trim trailing space from the *previous* text part to prevent double wrapping
-        if (textParts.length > 0) {
-          const lastPart = textParts[textParts.length - 1];
-          if (lastPart.text && typeof lastPart.text === 'string') {
-            lastPart.text = lastPart.text.trimEnd();
-          }
-        }
-
-        textParts.push({ text: '', options: { breakLine: true } });
-
-        // 2. Signal to trim leading space from the *next* text part
-        trimNextLeading = true;
-        return;
-      }
-
-      let textVal = child.nodeType === 3 ? child.nodeValue : child.textContent;
-      let nodeStyle = child.nodeType === 1 ? window.getComputedStyle(child) : style;
-      textVal = textVal.replace(/[\n\r\t]+/g, ' ').replace(/\s{2,}/g, ' ');
-
-      // Trimming logic
-      if (index === 0) textVal = textVal.trimStart();
-      if (trimNextLeading) {
-        textVal = textVal.trimStart();
-        trimNextLeading = false;
-      }
-
-      if (index === node.childNodes.length - 1) textVal = textVal.trimEnd();
-      if (nodeStyle.textTransform === 'uppercase') textVal = textVal.toUpperCase();
-      if (nodeStyle.textTransform === 'lowercase') textVal = textVal.toLowerCase();
-
-      if (textVal.length > 0) {
-        const textOpts = getTextStyle(nodeStyle, config.scale);
-
-        // BUG FIX: Numbers 1 and 2 having background.
-        // If this is a naked Text Node (nodeType 3), it inherits style from the parent container.
-        // The parent container's background is already rendered as the Shape Fill.
-        // We must NOT render it again as a Text Highlight, otherwise it looks like a solid marker on top of the shape.
-        if (child.nodeType === 3 && textOpts.highlight) {
-          delete textOpts.highlight;
-        }
-
-        textParts.push({ text: textVal, options: textOpts });
-      }
-    });
-
-    if (textParts.length > 0) {
-      let align = style.textAlign || 'left';
-      if (align === 'start') align = 'left';
-      if (align === 'end') align = 'right';
-      let valign = 'top';
-      if (style.alignItems === 'center') valign = 'middle';
-      if (style.justifyContent === 'center' && style.display.includes('flex')) align = 'center';
-
-      const pt = parseFloat(style.paddingTop) || 0;
-      const pb = parseFloat(style.paddingBottom) || 0;
-      if (Math.abs(pt - pb) < 2 && bgColorObj.hex) valign = 'middle';
-
-      let padding = getPadding(style, config.scale);
-      if (align === 'center' && valign === 'middle') padding = [0, 0, 0, 0];
-
-      textPayload = { text: textParts, align, valign, inset: padding };
-    }
-  }
-
-  if (hasGradient || (softEdge && bgColorObj.hex && !isImageWrapper)) {
-    let bgData = null;
-    let padIn = 0;
-    if (softEdge) {
-      const svgInfo = generateBlurredSVG(
-        widthPx,
-        heightPx,
-        bgColorObj.hex,
-        borderRadiusValue,
-        softEdge
-      );
-      bgData = svgInfo.data;
-      padIn = svgInfo.padding * PX_TO_INCH * config.scale;
-    } else {
-      bgData = generateGradientSVG(
-        widthPx,
-        heightPx,
-        style.backgroundImage,
-        borderRadiusValue,
-        hasBorder ? { color: borderColorObj.hex, width: borderWidth } : null
-      );
-    }
-
-    if (bgData) {
-      items.push({
-        type: 'image',
-        zIndex,
-        domOrder,
-        options: {
-          data: bgData,
-          x: x - padIn,
-          y: y - padIn,
-          w: w + padIn * 2,
-          h: h + padIn * 2,
-          rotate: rotation,
-        },
-      });
-    }
-
-    if (textPayload) {
-      textPayload.text[0].options.fontSize =
-        Math.floor(textPayload.text[0]?.options?.fontSize) || 12;
-      items.push({
-        type: 'text',
-        zIndex: zIndex + 1,
-        domOrder,
-        textParts: textPayload.text,
-        options: {
-          x,
-          y,
-          w,
-          h,
-          align: textPayload.align,
-          valign: textPayload.valign,
-          inset: textPayload.inset,
-          rotate: rotation,
-          margin: 0,
-          wrap: true,
-          autoFit: false,
-        },
-      });
-    }
-    if (hasCompositeBorder) {
-      const borderItems = createCompositeBorderItems(
-        borderInfo.sides,
-        x,
-        y,
-        w,
-        h,
-        config.scale,
-        zIndex,
-        domOrder
-      );
-      items.push(...borderItems);
-    }
-  } else if (
-    (bgColorObj.hex && !isImageWrapper) ||
-    hasUniformBorder ||
-    hasCompositeBorder ||
-    hasShadow ||
-    textPayload
-  ) {
-    const finalAlpha = safeOpacity * bgColorObj.opacity;
-    const transparency = (1 - finalAlpha) * 100;
-    const useSolidFill = bgColorObj.hex && !isImageWrapper;
-
-    if (hasPartialBorderRadius && useSolidFill && !textPayload) {
-      const shapeSvg = generateCustomShapeSVG(
-        widthPx,
-        heightPx,
-        bgColorObj.hex,
-        bgColorObj.opacity,
-        {
-          tl: parseFloat(style.borderTopLeftRadius) || 0,
-          tr: parseFloat(style.borderTopRightRadius) || 0,
-          br: parseFloat(style.borderBottomRightRadius) || 0,
-          bl: parseFloat(style.borderBottomLeftRadius) || 0,
-        }
-      );
-
-      items.push({
-        type: 'image',
-        zIndex,
-        domOrder,
-        options: { data: shapeSvg, x, y, w, h, rotate: rotation },
-      });
-    } else {
-      const shapeOpts = {
-        x,
-        y,
-        w,
-        h,
-        rotate: rotation,
-        fill: useSolidFill
-          ? { color: bgColorObj.hex, transparency: transparency }
-          : { type: 'none' },
-        line: hasUniformBorder ? borderInfo.options : null,
-      };
-
-      if (hasShadow) shapeOpts.shadow = getVisibleShadow(shadowStr, config.scale);
-
-      // 1. Calculate dimensions first
-      const minDimension = Math.min(widthPx, heightPx);
-
-      let rawRadius = parseFloat(style.borderRadius) || 0;
-      const isPercentage = style.borderRadius && style.borderRadius.toString().includes('%');
-
-      // 2. Normalize radius to pixels
-      let radiusPx = rawRadius;
-      if (isPercentage) {
-        radiusPx = (rawRadius / 100) * minDimension;
-      }
-
-      let shapeType = pptx.ShapeType.rect;
-
-      // 3. Determine Shape Logic
-      const isSquare = Math.abs(widthPx - heightPx) < 1;
-      const isFullyRound = radiusPx >= minDimension / 2;
-
-      // CASE A: It is an Ellipse if:
-      // 1. It is explicitly "50%" (standard CSS way to make ovals/circles)
-      // 2. OR it is a perfect square and fully rounded (a circle)
-      if (isFullyRound && (isPercentage || isSquare)) {
-        shapeType = pptx.ShapeType.ellipse;
-      }
-      // CASE B: It is a Rounded Rectangle (including "Pill" shapes)
-      else if (radiusPx > 0) {
-        shapeType = pptx.ShapeType.roundRect;
-        let r = radiusPx / minDimension;
-        if (r > 0.5) r = 0.5;
-        if (minDimension < 100) r = r * 0.25; // Small size adjustment for small shapes
-
-        shapeOpts.rectRadius = r;
-      }
-
-      if (textPayload) {
-        textPayload.text[0].options.fontSize =
-          Math.floor(textPayload.text[0]?.options?.fontSize) || 12;
-        const textOptions = {
-          shape: shapeType,
-          ...shapeOpts,
-          rotate: rotation,
-          align: textPayload.align,
-          valign: textPayload.valign,
-          inset: textPayload.inset,
-          margin: 0,
-          wrap: true,
-          autoFit: false,
-        };
-        items.push({
-          type: 'text',
-          zIndex,
-          domOrder,
-          textParts: textPayload.text,
-          options: textOptions,
-        });
-      } else if (!hasPartialBorderRadius) {
-        items.push({
-          type: 'shape',
-          zIndex,
-          domOrder,
-          shapeType,
-          options: shapeOpts,
-        });
-      }
-    }
-
-    if (hasCompositeBorder) {
-      const borderSvgData = generateCompositeBorderSVG(
-        widthPx,
-        heightPx,
-        borderRadiusValue,
-        borderInfo.sides
-      );
-      if (borderSvgData) {
-        items.push({
-          type: 'image',
-          zIndex: zIndex + 1,
-          domOrder,
-          options: { data: borderSvgData, x, y, w, h, rotate: rotation },
-        });
-      }
-    }
-  }
-
-  return { items, stopRecursion: !!textPayload };
-}
-
-function isComplexHierarchy(root) {
-  // Use a simple tree traversal to find forbidden elements in the list structure
-  const stack = [root];
-  while (stack.length > 0) {
-    const el = stack.pop();
-
-    // 1. Layouts: Flex/Grid on LIs
-    if (el.tagName === 'LI') {
-      const s = window.getComputedStyle(el);
-      if (s.display === 'flex' || s.display === 'grid' || s.display === 'inline-flex') return true;
-    }
-
-    // 2. Media / Icons
-    if (['IMG', 'SVG', 'CANVAS', 'VIDEO', 'IFRAME'].includes(el.tagName)) return true;
-    if (isIconElement(el)) return true;
-
-    // 3. Nested Lists (Flattening logic doesn't support nested bullets well yet)
-    if (el !== root && (el.tagName === 'UL' || el.tagName === 'OL')) return true;
-
-    // Recurse, but don't go too deep if not needed
-    for (let i = 0; i < el.children.length; i++) {
-      stack.push(el.children[i]);
-    }
-  }
-  return false;
-}
-
-function collectListParts(node, parentStyle, scale) {
-  const parts = [];
-
-  // Check for CSS Content (::before) - often used for icons
-  if (node.nodeType === 1) {
-    const beforeStyle = window.getComputedStyle(node, '::before');
-    const content = beforeStyle.content;
-    if (content && content !== 'none' && content !== 'normal' && content !== '""') {
-      // Strip quotes
-      const cleanContent = content.replace(/^['"]|['"]$/g, '');
-      if (cleanContent.trim()) {
-        parts.push({
-          text: cleanContent + ' ', // Add space after icon
-          options: getTextStyle(window.getComputedStyle(node), scale),
-        });
-      }
-    }
-  }
-
-  node.childNodes.forEach((child) => {
-    if (child.nodeType === 3) {
-      // Text
-      const val = child.nodeValue.replace(/[\n\r\t]+/g, ' ').replace(/\s{2,}/g, ' ');
-      if (val) {
-        // Use parent style if child is text node, otherwise current style
-        const styleToUse = node.nodeType === 1 ? window.getComputedStyle(node) : parentStyle;
-        parts.push({
-          text: val,
-          options: getTextStyle(styleToUse, scale),
-        });
-      }
-    } else if (child.nodeType === 1) {
-      // Element (span, i, b)
-      // Recurse
-      parts.push(...collectListParts(child, parentStyle, scale));
-    }
-  });
-
-  return parts;
-}
-
-function createCompositeBorderItems(sides, x, y, w, h, scale, zIndex, domOrder) {
-  const items = [];
-  const pxToInch = 1 / 96;
-  const common = { zIndex: zIndex + 1, domOrder, shapeType: 'rect' };
-
-  if (sides.top.width > 0)
-    items.push({
-      ...common,
-      options: { x, y, w, h: sides.top.width * pxToInch * scale, fill: { color: sides.top.color } },
-    });
-  if (sides.right.width > 0)
-    items.push({
-      ...common,
-      options: {
-        x: x + w - sides.right.width * pxToInch * scale,
-        y,
-        w: sides.right.width * pxToInch * scale,
-        h,
-        fill: { color: sides.right.color },
-      },
-    });
-  if (sides.bottom.width > 0)
-    items.push({
-      ...common,
-      options: {
-        x,
-        y: y + h - sides.bottom.width * pxToInch * scale,
-        w,
-        h: sides.bottom.width * pxToInch * scale,
-        fill: { color: sides.bottom.color },
-      },
-    });
-  if (sides.left.width > 0)
-    items.push({
-      ...common,
-      options: {
-        x,
-        y,
-        w: sides.left.width * pxToInch * scale,
-        h,
-        fill: { color: sides.left.color },
-      },
-    });
-
-  return items;
 }
