@@ -168,6 +168,7 @@ export function extractTableData(node, scale, globalOptions = {}) {
 
         border: [borderTop, borderRight, borderBottom, borderLeft],
       };
+      if (textStyle.lang) cellOptions.lang = textStyle.lang;
       if (textStyle.transparency) cellOptions.transparency = textStyle.transparency;
 
       rowData.push({ text: cellText, options: cellOptions });

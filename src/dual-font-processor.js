@@ -134,21 +134,38 @@ export async function postProcessDualFonts(blob) {
 
   for (const fileName of xmlFiles) {
     let content = await zip.file(fileName).async('string');
+    let fileModified = false;
     const result = processDualFontsInXml(content);
 
     if (result.modified) {
       content = result.xml;
-      modified = true;
+      fileModified = true;
     }
 
     // Fix PptxGenJS hardcoded algn="bl" on outerShdw/innerShdw.
     // CSS box-shadow is center-aligned; OOXML algn="ctr" matches that model.
     if (content.includes('algn="bl"') && content.includes('Shdw')) {
       content = content.replace(/(<a:(?:outer|inner)Shdw\b[^>]*?)algn="bl"/g, '$1algn="ctr"');
+      fileModified = true;
+    }
+
+    // Strip pitchFamily and charset from font elements (a:latin, a:ea, a:cs).
+    // PptxGenJS hardcodes these values which can cause PowerPoint (especially Mac)
+    // to reject or mismap fonts. Letting PowerPoint resolve by typeface alone is safer.
+    {
+      const stripped = content.replace(
+        /(<a:(?:latin|ea|cs)\s+typeface="[^"]*")\s+pitchFamily="[^"]*"\s*charset="[^"]*"/g,
+        '$1'
+      );
+      if (stripped !== content) {
+        content = stripped;
+        fileModified = true;
+      }
+    }
+
+    if (fileModified) {
       zip.file(fileName, content);
       modified = true;
-    } else if (result.modified) {
-      zip.file(fileName, content);
     }
   }
 

@@ -147,6 +147,7 @@ function renderStyledTable(node, config, domOrder, dims, globalOptions) {
           wrap: true,
           autoFit: false,
         };
+        if (textStyle.lang) textOpts.lang = textStyle.lang;
 
         items.push({
           type: 'text',

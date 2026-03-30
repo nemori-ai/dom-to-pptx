@@ -97,17 +97,51 @@ function detectLanguage(text) {
   return undefined;
 }
 
+// Platform-specific CJK fonts that don't work reliably in PowerPoint.
+// Maps to Office-safe cross-platform alternatives.
+const CJK_FONT_COMPAT_MAP = {
+  // macOS fonts → Office-safe
+  'pingfang sc': 'Microsoft YaHei',
+  'pingfang tc': 'Microsoft JhengHei',
+  'pingfang hk': 'Microsoft JhengHei',
+  'heiti sc': 'Microsoft YaHei',
+  'heiti tc': 'Microsoft JhengHei',
+  'songti sc': 'SimSun',
+  'songti tc': 'MingLiU',
+  'kaiti sc': 'KaiTi',
+  'stheitisc-light': 'Microsoft YaHei',
+  stheiti: 'Microsoft YaHei',
+  'hiragino sans gb': 'Microsoft YaHei',
+  // Linux/Android fonts → Office-safe
+  'noto sans sc': 'Microsoft YaHei',
+  'noto sans tc': 'Microsoft JhengHei',
+  'noto sans cjk sc': 'Microsoft YaHei',
+  'noto sans cjk tc': 'Microsoft JhengHei',
+  'noto sans cjk jp': 'Yu Gothic',
+  'noto sans cjk kr': 'Malgun Gothic',
+  'noto serif sc': 'SimSun',
+  'noto serif cjk sc': 'SimSun',
+  'source han sans sc': 'Microsoft YaHei',
+  'source han sans tc': 'Microsoft JhengHei',
+  'source han serif sc': 'SimSun',
+  'wenquanyi micro hei': 'Microsoft YaHei',
+  'wenquanyi zen hei': 'Microsoft YaHei',
+  'droid sans fallback': 'Microsoft YaHei',
+};
+
 /**
- * Detect platform and return appropriate default CJK font.
- * Used as last resort when no CJK font found in entire inheritance chain.
+ * Map a CJK font to an Office-compatible equivalent.
+ * Returns the original font if no mapping is needed.
+ */
+function toOfficeCJKFont(fontName) {
+  return CJK_FONT_COMPAT_MAP[fontName.toLowerCase()] || fontName;
+}
+
+/**
+ * Return the default CJK font for PPTX output.
+ * Always returns an Office-safe font regardless of platform.
  */
 function getSystemCJKFont() {
-  const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
-  const platform = typeof navigator !== 'undefined' ? navigator.platform || '' : '';
-
-  if (platform.includes('Mac') || /iPhone|iPad|iPod/.test(ua)) return 'PingFang SC';
-  if (platform.includes('Win')) return 'Microsoft YaHei';
-  if (/Android/.test(ua) || platform.includes('Linux')) return 'Noto Sans CJK SC';
   return 'Microsoft YaHei';
 }
 
@@ -327,7 +361,7 @@ function selectFontForText(fontFamilyStr, text, node = null) {
       if (!latinFont) latinFont = resolveFontName(font, false);
       if (!eaFont) eaFont = resolveFontName(font, true);
     } else if (isCJKFont(font)) {
-      if (!eaFont) eaFont = font;
+      if (!eaFont) eaFont = toOfficeCJKFont(font);
     } else {
       if (!latinFont) latinFont = font;
     }
