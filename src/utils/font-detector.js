@@ -32,6 +32,86 @@ export function getUsedFontFamilies(root) {
 }
 
 /**
+ * For Google Fonts: extract family names from <link> tags and @import rules,
+ * then download full TTF from the google/fonts GitHub repo (CORS-friendly).
+ * Returns a Map of familyName -> { buffer: ArrayBuffer, type: 'ttf' }.
+ */
+async function resolveGoogleFontsFullTTF(usedFamilies) {
+  const result = new Map();
+  const gfFamilies = new Set();
+
+  // Check <link> tags
+  for (const link of document.querySelectorAll('link[href*="fonts.googleapis.com"]')) {
+    const href = link.getAttribute('href');
+    if (!href) continue;
+    for (const m of href.matchAll(/family=([^&:]+)/g)) {
+      const name = decodeURIComponent(m[1]).replace(/\+/g, ' ');
+      if (usedFamilies.has(name)) gfFamilies.add(name);
+    }
+  }
+
+  // Check @import in stylesheets
+  for (const sheet of document.styleSheets) {
+    try {
+      const rules = sheet.cssRules || sheet.rules;
+      if (!rules) continue;
+      for (const rule of rules) {
+        if (rule.type === 3 && rule.href && rule.href.includes('fonts.googleapis.com')) {
+          for (const m of rule.href.matchAll(/family=([^&:]+)/g)) {
+            const name = decodeURIComponent(m[1]).replace(/\+/g, ' ');
+            if (usedFamilies.has(name)) gfFamilies.add(name);
+          }
+        }
+      }
+    } catch {
+      // CORS
+    }
+  }
+
+  // Download full TTF from Google Fonts GitHub repo in parallel.
+  // URL pattern: https://raw.githubusercontent.com/google/fonts/main/{license}/{dir}/{Name}-Regular.ttf
+  // Also tries variable font pattern: {Name}[wght].ttf for fonts without static Regular.
+  // Directory is font name lowercased with spaces removed.
+  // Falls back to apache/ and ufl/ directories if ofl/ fails.
+  const GITHUB_BASE = 'https://raw.githubusercontent.com/google/fonts/main';
+  const LICENSE_DIRS = ['ofl', 'apache', 'ufl'];
+  const FETCH_TIMEOUT = 5000;
+
+  const fetchWithTimeout = (url) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+    return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+  };
+
+  await Promise.all(
+    [...gfFamilies].map(async (family) => {
+      const dirName = family.toLowerCase().replace(/\s+/g, '');
+      const baseName = family.replace(/\s+/g, '');
+      // Try static Regular first, then variable font pattern
+      const fileNames = [`${baseName}-Regular.ttf`, `${baseName}[wght].ttf`];
+
+      for (const fileName of fileNames) {
+        for (const licDir of LICENSE_DIRS) {
+          try {
+            const url = `${GITHUB_BASE}/${licDir}/${dirName}/${fileName}`;
+            const resp = await fetchWithTimeout(url);
+            if (!resp.ok) continue;
+            const buf = await resp.arrayBuffer();
+            result.set(family, { buffer: buf, type: 'ttf' });
+            return;
+          } catch {
+            // Try next
+          }
+        }
+      }
+      console.warn(`Could not find full TTF for "${family}" on GitHub`);
+    })
+  );
+
+  return result;
+}
+
+/**
  * Scans document.styleSheets to find @font-face URLs for the requested families.
  * Returns an array of { name, url } objects.
  */
@@ -61,6 +141,8 @@ export async function getAutoDetectedFonts(usedFamilies) {
     return chosenUrl;
   };
 
+  const processedFamilies = new Set();
+
   for (const sheet of Array.from(document.styleSheets)) {
     try {
       // Accessing cssRules on cross-origin sheets (like Google Fonts) might fail
@@ -72,12 +154,15 @@ export async function getAutoDetectedFonts(usedFamilies) {
         if (rule.constructor.name === 'CSSFontFaceRule' || rule.type === 5) {
           const familyName = rule.style.getPropertyValue('font-family').replace(/['"]/g, '').trim();
 
-          if (usedFamilies.has(familyName)) {
+          // Only embed one file per font family (Google Fonts returns multiple
+          // unicode-range subsets — we need the full font, not subsets).
+          if (usedFamilies.has(familyName) && !processedFamilies.has(familyName)) {
             const src = rule.style.getPropertyValue('src');
             const url = extractUrl(src);
 
             if (url && !processedUrls.has(url)) {
               processedUrls.add(url);
+              processedFamilies.add(familyName);
               foundFonts.push({ name: familyName, url: url });
             }
           }
@@ -88,6 +173,16 @@ export async function getAutoDetectedFonts(usedFamilies) {
       // We cannot scan those automatically via CSSOM.
       console.warn('error:', e);
       console.warn('Cannot scan stylesheet for fonts (CORS restriction):', sheet.href);
+    }
+  }
+
+  // For Google Fonts: replace WOFF2 subset URL with full TTF from GitHub.
+  const googleFullFonts = await resolveGoogleFontsFullTTF(usedFamilies);
+  for (const font of foundFonts) {
+    const fullFont = googleFullFonts.get(font.name);
+    if (fullFont) {
+      font.buffer = fullFont.buffer;
+      font.type = fullFont.type;
     }
   }
 

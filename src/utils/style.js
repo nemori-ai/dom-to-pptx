@@ -34,6 +34,43 @@ export function getSoftEdges(filterStr, scale) {
 }
 
 /**
+ * Detects if a CSS transform contains a skew component.
+ * PPTX has no native skew support, so skewed elements need canvas capture.
+ *
+ * In a 2D matrix(a, b, c, d, e, f):
+ *   Pure rotation: b = sin(θ), c = -sin(θ)  → b + c = 0
+ *   With skew:     b + c ≠ 0
+ * In a 3D matrix3d: check m21 (values[4]) vs m12 (values[1]) similarly.
+ */
+export function hasSkewTransform(transformStr) {
+  if (!transformStr || transformStr === 'none') return false;
+
+  const matrix3dMatch = transformStr.match(/matrix3d\(([^)]+)\)/);
+  if (matrix3dMatch) {
+    const v = matrix3dMatch[1].split(',').map((s) => parseFloat(s.trim()));
+    if (v.length >= 6) {
+      // m12 = v[1], m21 = v[4]; for pure rotation+scale b+c ≈ 0
+      return Math.abs(v[1] + v[4]) > 0.001;
+    }
+    return false;
+  }
+
+  const matrixMatch = transformStr.match(/matrix\(([^)]+)\)/);
+  if (matrixMatch) {
+    const v = matrixMatch[1].split(',').map((s) => parseFloat(s.trim()));
+    if (v.length >= 4) {
+      const b = v[1];
+      const c = v[2];
+      // For pure rotation: b = sin(θ), c = -sin(θ) → b + c = 0
+      // For skew: b and c are independent → b + c ≠ 0
+      return Math.abs(b + c) > 0.001;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Extracts rotation angle from CSS transform matrix (2D or 3D).
  * For matrix3d, extracts Z-axis rotation from the 3D rotation matrix.
  */

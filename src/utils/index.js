@@ -48,6 +48,7 @@ export {
   getClippingAncestor,
   resolveImageScale,
   getFlip,
+  hasSkewTransform,
 } from './style.js';
 
 // Font detection utilities

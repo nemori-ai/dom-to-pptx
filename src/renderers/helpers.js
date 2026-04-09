@@ -7,7 +7,7 @@ import { parseColor } from '../utils/color.js';
 import { generateGradientSVG } from '../utils/svg.js';
 import { getBorderInfo, generateCompositeBorderSVG } from '../utils/border.js';
 import { LAYER } from '../utils/stacking.js';
-import { PX_TO_INCH } from '../utils/constants.js';
+import { PX_TO_INCH, PX_TO_PT } from '../utils/constants.js';
 
 let concurrencyLimit = 10;
 let activeCount = 0;
@@ -56,6 +56,8 @@ export async function captureBackgroundSnapshot(root) {
       const result = await snapdom(root, {
         scale: 1,
         backgroundColor: 'transparent',
+        embedFonts: true,
+        embedImages: true,
       });
       const canvas = await result.toCanvas();
 
@@ -168,6 +170,8 @@ export async function captureGradientText(node, widthPx, heightPx, imageScale = 
       const result = await snapdom(node, {
         scale: imageScale,
         backgroundColor: 'transparent',
+        embedFonts: true,
+        embedImages: true,
       });
       const canvas = await result.toCanvas();
       return canvas.toDataURL('image/png');
@@ -192,6 +196,8 @@ export async function elementToCanvasImage(node, widthPx, heightPx, imageScale =
       const result = await snapdom(node, {
         scale: imageScale,
         backgroundColor: 'transparent',
+        embedFonts: true,
+        embedImages: true,
       });
       const sourceCanvas = await result.toCanvas();
 
@@ -514,23 +520,6 @@ export function collectPseudoElementItems(
       (ps.display === 'inline-block' || ps.display === 'block' || ps.display === 'flex') &&
       (rawContent === '""' || rawContent === "''");
 
-    if (node.className && node.className.includes && node.className.includes('contact-item')) {
-      console.log(
-        '[dom-to-pptx] [pseudo-check] ' +
-          pseudo +
-          ' pos=' +
-          position +
-          ' disp=' +
-          ps.display +
-          ' content=' +
-          JSON.stringify(rawContent) +
-          ' isPos=' +
-          isPositioned +
-          ' isDecor=' +
-          isInlineDecor
-      );
-    }
-
     if (!isPositioned && !isInlineDecor) continue;
 
     const bTop = parseFloat(ps.borderTopWidth) || 0;
@@ -624,38 +613,41 @@ export function collectPseudoElementItems(
     const maskImg = ps.webkitMaskImage || ps.maskImage || 'none';
     const hasMask = maskImg !== 'none';
 
-    if (node.className && node.className.includes && node.className.includes('contact-item')) {
-      console.log(
-        '[dom-to-pptx] [mask-debug] hasMask=' +
-          hasMask +
-          ' hasBg=' +
-          hasBg +
-          ' w=' +
-          pseudoW +
-          ' h=' +
-          pseudoH +
-          ' maskImg=' +
-          maskImg.substring(0, 80)
-      );
-    }
     if (hasMask && hasBg && pseudoW > 0 && pseudoH > 0) {
-      const svgUrlMatch = maskImg.match(/url\("?(data:image\/svg\+xml[^)]+)"?\)/);
-      if (svgUrlMatch) {
+      // Extract the data URI from url("...") or url(...).
+      // Chrome wraps in double quotes and escapes inner quotes as \".
+      let svgUrl = '';
+      const quotedMatch = maskImg.match(/url\("(.+?)"\)/);
+      if (quotedMatch) {
+        svgUrl = quotedMatch[1].replace(/\\"/g, '"');
+      } else {
+        const unquotedMatch = maskImg.match(/url\(([^)]+)\)/);
+        if (unquotedMatch) svgUrl = unquotedMatch[1];
+      }
+
+      if (svgUrl && svgUrl.startsWith('data:image/svg+xml')) {
         let svgContent = '';
-        const svgUrl = svgUrlMatch[1];
         if (svgUrl.includes(';utf8,'))
-          svgContent = decodeURIComponent(svgUrl.split(';utf8,')[1]).replace(/\\"/g, '"');
-        else if (svgUrl.includes(';base64,')) svgContent = atob(svgUrl.split(';base64,')[1]);
+          svgContent = decodeURIComponent(svgUrl.split(';utf8,')[1]);
+        else if (svgUrl.includes(';charset=utf-8,'))
+          svgContent = decodeURIComponent(svgUrl.split(';charset=utf-8,')[1]);
+        else if (svgUrl.includes(';base64,'))
+          svgContent = atob(svgUrl.split(';base64,')[1]);
+        else {
+          const commaIdx = svgUrl.indexOf(',');
+          if (commaIdx > -1) svgContent = decodeURIComponent(svgUrl.substring(commaIdx + 1));
+        }
 
         if (svgContent) {
           const hexColor = bgColor.hex ? '#' + bgColor.hex : '#FFFFFF';
           const s = 4;
           const cw = pseudoW * s,
             ch = pseudoH * s;
+          // Replace currentColor with the actual background color, set explicit size
           const maskSvg = svgContent
             .replace(/<svg\b/, `<svg width="${cw}" height="${ch}"`)
-            .replace(/stroke="currentColor"/g, `stroke="#FFFFFF"`)
-            .replace(/fill="currentColor"/g, 'fill="#FFFFFF"');
+            .replace(/stroke="currentColor"/g, `stroke="${hexColor}"`)
+            .replace(/fill="currentColor"/g, `fill="${hexColor}"`);
 
           const item = {
             type: 'image',
@@ -665,7 +657,6 @@ export function collectPseudoElementItems(
           };
           items.push(item);
           const capturedSvg = maskSvg;
-          const capturedColor = hexColor;
           jobs.push(async () => {
             const img = new Image();
             const svgDataUrl =
@@ -675,17 +666,11 @@ export function collectPseudoElementItems(
               img.onerror = r;
               img.src = svgDataUrl;
             });
-            console.log(
-              '[dom-to-pptx] [mask-load] w=' + img.naturalWidth + ' h=' + img.naturalHeight
-            );
             if (img.naturalWidth > 0) {
               const cvs = document.createElement('canvas');
               cvs.width = cw;
               cvs.height = ch;
               const ctx = cvs.getContext('2d');
-              ctx.fillStyle = capturedColor;
-              ctx.fillRect(0, 0, cw, ch);
-              ctx.globalCompositeOperation = 'destination-in';
               ctx.drawImage(img, 0, 0, cw, ch);
               item.options.data = cvs.toDataURL('image/png');
             }
@@ -842,75 +827,109 @@ export function collectPseudoElementItems(
     if (text && text !== '""' && text !== "''") {
       const textColor = parseColor(ps.color);
       const fontSize = parseFloat(ps.fontSize) || 14;
-      const textStyle = getTextStyle(ps, config.scale, text, node, {});
-      if (textColor.hex) textStyle.color = textColor.hex;
-      if (textColor.opacity < 1) textStyle.transparency = Math.round((1 - textColor.opacity) * 100);
 
-      const padL = parseFloat(ps.paddingLeft) || 0;
-      const padR = parseFloat(ps.paddingRight) || 0;
-      const padT = parseFloat(ps.paddingTop) || 0;
-      const padB = parseFloat(ps.paddingBottom) || 0;
+      // Bullet characters (•, ◦, ●, etc.) have unpredictable vertical
+      // positioning within a text box. Replace single-character bullets
+      // with a geometric ellipse shape for pixel-accurate alignment.
+      const BULLET_CHARS = '\u2022\u25CF\u25CB\u25E6\u25AA\u25AB\u25A0\u25A1\u2023\u25B8\u25B9\u25B6\u25C0\u2013\u2014';
+      if (text.length === 1 && BULLET_CHARS.includes(text) && isPositioned) {
+        const parentLH = parseFloat(window.getComputedStyle(node).lineHeight);
+        const lineH = !isNaN(parentLH) ? parentLH : fontSize * 1.4;
+        // Size the dot relative to font size (~30%)
+        const dotSize = fontSize * 0.3;
+        const dotIn = dotSize * PX_TO_INCH * config.scale;
+        // Centre the dot vertically within the parent's first line
+        const dotX = pX + (pW - dotIn) / 2;
+        const dotY = pY + (lineH * PX_TO_INCH * config.scale - dotIn) / 2;
 
-      const estTextW = fontSize * text.length * PX_TO_INCH * config.scale;
-      const estTextH = fontSize * 1.4 * PX_TO_INCH * config.scale;
+        const hex = textColor.hex || 'FFFFFF';
+        const transparency = textColor.opacity < 1 ? (1 - textColor.opacity) * 100 : 0;
 
-      let textAlign = ps.textAlign || 'center';
-      if (textAlign === 'start') textAlign = 'left';
+        items.push({
+          type: 'shape',
+          layer: LAYER.CONTENT,
+          domOrder: domOrder + 0.1,
+          shapeType: 'ellipse',
+          options: {
+            x: dotX,
+            y: dotY,
+            w: dotIn,
+            h: dotIn,
+            fill: { color: hex, transparency },
+            line: { type: 'none' },
+          },
+        });
+      } else {
+        // General text pseudo-element
+        const textStyle = getTextStyle(ps, config.scale, text, node, {});
+        if (textColor.hex) textStyle.color = textColor.hex;
+        if (textColor.opacity < 1) textStyle.transparency = Math.round((1 - textColor.opacity) * 100);
 
-      const textOpts = {
-        x: pX,
-        y: pY,
-        w: pW > 0 ? pW : estTextW,
-        h: pH > 0 ? pH : estTextH,
-        align: textAlign,
-        valign: 'middle',
-        // Pass margin in inches so PptxGenJS always uses inch2Emu
-        // (avoids its margin[0] >= 1 heuristic misinterpreting points as inches)
-        margin: [
-          padT * PX_TO_INCH * config.scale,
-          padR * PX_TO_INCH * config.scale,
-          padB * PX_TO_INCH * config.scale,
-          padL * PX_TO_INCH * config.scale,
-        ],
-        wrap: false,
-        autoFit: false,
-      };
+        const padL = parseFloat(ps.paddingLeft) || 0;
+        const padR = parseFloat(ps.paddingRight) || 0;
+        const padT = parseFloat(ps.paddingTop) || 0;
+        const padB = parseFloat(ps.paddingBottom) || 0;
 
-      if (hasBg && bgColor.hex) {
-        const transparency = (1 - bgColor.opacity) * 100;
-        textOpts.fill = { color: bgColor.hex, transparency };
-      }
+        const estTextW = fontSize * text.length * PX_TO_INCH * config.scale;
+        const estTextH = fontSize * 1.4 * PX_TO_INCH * config.scale;
 
-      const borderInfo = getBorderInfo(ps, config.scale);
-      if (borderInfo.type === 'uniform') {
-        textOpts.line = borderInfo.options;
-      }
+        let textAlign = ps.textAlign || 'center';
+        if (textAlign === 'start') textAlign = 'left';
 
-      const brStr = ps.borderRadius || '';
-      const brPx = brStr.includes('%')
-        ? (parseFloat(brStr) / 100) * Math.min(pseudoW, pseudoH)
-        : parseFloat(brStr) || 0;
-      if (brPx > 0) {
-        textOpts.rectRadius = brPx * PX_TO_INCH * config.scale;
-      }
+        const textOpts = {
+          x: pX,
+          y: pY,
+          w: pW > 0 ? pW : estTextW,
+          h: pH > 0 ? pH : estTextH,
+          align: textAlign,
+          valign: 'middle',
+          // PptxGenJS margin expects points (valToPts multiplies by 12700 EMU/pt)
+          margin: [
+            padT * PX_TO_PT * config.scale,
+            padR * PX_TO_PT * config.scale,
+            padB * PX_TO_PT * config.scale,
+            padL * PX_TO_PT * config.scale,
+          ],
+          wrap: false,
+          autoFit: false,
+        };
 
-      items.push({
-        type: 'text',
-        layer: LAYER.CONTENT,
-        domOrder: domOrder + 0.1,
-        textParts: [{ text, options: textStyle }],
-        options: textOpts,
-      });
+        if (hasBg && bgColor.hex) {
+          const transparency = (1 - bgColor.opacity) * 100;
+          textOpts.fill = { color: bgColor.hex, transparency };
+        }
 
-      if (borderInfo.type === 'composite') {
-        const borderSvg = generateCompositeBorderSVG(pseudoW, pseudoH, brPx, borderInfo.sides);
-        if (borderSvg) {
-          items.push({
-            type: 'image',
-            layer: LAYER.OVERLAY,
-            domOrder: domOrder + 0.3,
-            options: { data: borderSvg, x: pX, y: pY, w: pW, h: pH },
-          });
+        const borderInfo = getBorderInfo(ps, config.scale);
+        if (borderInfo.type === 'uniform') {
+          textOpts.line = borderInfo.options;
+        }
+
+        const brStr = ps.borderRadius || '';
+        const brPx = brStr.includes('%')
+          ? (parseFloat(brStr) / 100) * Math.min(pseudoW, pseudoH)
+          : parseFloat(brStr) || 0;
+        if (brPx > 0) {
+          textOpts.rectRadius = brPx * PX_TO_INCH * config.scale;
+        }
+
+        items.push({
+          type: 'text',
+          layer: LAYER.CONTENT,
+          domOrder: domOrder + 0.1,
+          textParts: [{ text, options: textStyle }],
+          options: textOpts,
+        });
+
+        if (borderInfo.type === 'composite') {
+          const borderSvg = generateCompositeBorderSVG(pseudoW, pseudoH, brPx, borderInfo.sides);
+          if (borderSvg) {
+            items.push({
+              type: 'image',
+              layer: LAYER.OVERLAY,
+              domOrder: domOrder + 0.3,
+              options: { data: borderSvg, x: pX, y: pY, w: pW, h: pH },
+            });
+          }
         }
       }
     }

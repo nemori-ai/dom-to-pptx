@@ -359,6 +359,25 @@ export function generateGradientSVG(w, h, bgString, radius, border, blurPx) {
       strokeAttr = `stroke="#${border.color}" stroke-width="${border.width}"`;
     }
 
+    // Support both uniform radius (number) and per-corner radius (object {tl,tr,br,bl})
+    let shapeTag;
+    if (typeof radius === 'object' && radius !== null) {
+      const { tl = 0, tr = 0, br = 0, bl = 0 } = radius;
+      // SVG path with true circular arcs for each corner
+      shapeTag =
+        `<path d="M${tl},0 L${w - tr},0` +
+        (tr > 0 ? ` A${tr},${tr} 0 0 1 ${w},${tr}` : ` L${w},0`) +
+        ` L${w},${h - br}` +
+        (br > 0 ? ` A${br},${br} 0 0 1 ${w - br},${h}` : ` L${w},${h}`) +
+        ` L${bl},${h}` +
+        (bl > 0 ? ` A${bl},${bl} 0 0 1 0,${h - bl}` : ` L0,${h}`) +
+        ` L0,${tl}` +
+        (tl > 0 ? ` A${tl},${tl} 0 0 1 ${tl},0` : ` L0,0`) +
+        ` Z" fill="url(#grad)" ${strokeAttr}/>`;
+    } else {
+      shapeTag = `<rect x="0" y="0" width="${w}" height="${h}" rx="${radius}" ry="${radius}" fill="url(#grad)" ${strokeAttr} />`;
+    }
+
     const svg = `
       <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
           <defs>
@@ -366,7 +385,7 @@ export function generateGradientSVG(w, h, bgString, radius, border, blurPx) {
               ${stopsXML}
             </linearGradient>
           </defs>
-          <rect x="0" y="0" width="${w}" height="${h}" rx="${radius}" ry="${radius}" fill="url(#grad)" ${strokeAttr} />
+          ${shapeTag}
       </svg>`;
 
     return 'data:image/svg+xml;base64,' + utoa(svg);
@@ -461,8 +480,12 @@ function resolveUseReferences(sourceNode, cloneSvg) {
 function prepareSvgClone(node) {
   const clone = node.cloneNode(true);
   const rect = node.getBoundingClientRect();
-  const cssWidth = rect.width || 300;
-  const cssHeight = rect.height || 150;
+  // Use pre-transform CSS layout dimensions. getBoundingClientRect() returns
+  // the axis-aligned bounding box AFTER CSS transforms (rotation), which would
+  // distort the serialized SVG clone (it has no CSS transform applied).
+  const computed = window.getComputedStyle(node);
+  const cssWidth = parseFloat(computed.width) || rect.width || 300;
+  const cssHeight = parseFloat(computed.height) || rect.height || 150;
 
   // Resolve <use href="#id"> references that point to <defs> in other SVGs.
   // When the clone is serialized standalone, cross-SVG references break,

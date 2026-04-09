@@ -31,8 +31,11 @@ export class ElementRenderer {
     // offsetWidth/Height give pre-transform layout dimensions.
     // getBoundingClientRect() returns the axis-aligned bounding box AFTER rotation,
     // which is larger than the actual element for non-90° rotations.
-    const widthPx = node.offsetWidth || rect.width;
-    const heightPx = node.offsetHeight || rect.height;
+    // SVG elements lack offsetWidth/Height (they are not HTMLElement), so use
+    // getComputedStyle as intermediate fallback for pre-transform dimensions.
+    const computed = style || window.getComputedStyle(node);
+    const widthPx = node.offsetWidth || parseFloat(computed.width) || rect.width;
+    const heightPx = node.offsetHeight || parseFloat(computed.height) || rect.height;
     const unrotatedW = widthPx * PX_TO_INCH * config.scale;
     const unrotatedH = heightPx * PX_TO_INCH * config.scale;
 
@@ -84,25 +87,42 @@ export class ElementRenderer {
 
     const hasAnyRadius = radii.tl > 0 || radii.tr > 0 || radii.br > 0 || radii.bl > 0;
 
-    // Check parent for inherited clipping
+    // Walk up ancestors to find a clipping ancestor with border-radius.
+    // PPTX has no parent-child clipping, so children must self-clip to
+    // match the browser's overflow:hidden + border-radius behaviour.
     if (!hasAnyRadius) {
-      const parent = node.parentElement;
-      if (parent) {
-        const parentStyle = window.getComputedStyle(parent);
-        if (parentStyle.overflow !== 'visible') {
-          const pRect = parent.getBoundingClientRect();
-          const pDim = Math.min(pRect.width, pRect.height);
-          const pRadii = {
-            tl: parseRadius(parentStyle.borderTopLeftRadius, pDim),
-            tr: parseRadius(parentStyle.borderTopRightRadius, pDim),
-            br: parseRadius(parentStyle.borderBottomRightRadius, pDim),
-            bl: parseRadius(parentStyle.borderBottomLeftRadius, pDim),
-          };
-          // If parent is roughly the same size, inherit its radii
-          if (Math.abs(pRect.width - width) < 5 && Math.abs(pRect.height - height) < 5) {
-            radii = pRadii;
+      const nodeRect = node.getBoundingClientRect();
+      const clampR = (r) => Math.min(r, width, height);
+      let ancestor = node.parentElement;
+
+      while (ancestor && ancestor !== document.body) {
+        const aStyle = window.getComputedStyle(ancestor);
+        if (aStyle.overflow === 'hidden' || aStyle.overflow === 'clip') {
+          const aRect = ancestor.getBoundingClientRect();
+          const aDim = Math.min(aRect.width, aRect.height);
+          const aTL = parseRadius(aStyle.borderTopLeftRadius, aDim);
+          const aTR = parseRadius(aStyle.borderTopRightRadius, aDim);
+          const aBR = parseRadius(aStyle.borderBottomRightRadius, aDim);
+          const aBL = parseRadius(aStyle.borderBottomLeftRadius, aDim);
+
+          if (aTL > 0 || aTR > 0 || aBR > 0 || aBL > 0) {
+            const T = 3; // edge-alignment tolerance in px
+            const atLeft = Math.abs(nodeRect.left - aRect.left) < T;
+            const atRight = Math.abs(nodeRect.right - aRect.right) < T;
+            const atTop = Math.abs(nodeRect.top - aRect.top) < T;
+            const atBottom = Math.abs(nodeRect.bottom - aRect.bottom) < T;
+
+            const canFit = (r) => width >= r && height >= r;
+            if (atTop && atLeft && canFit(aTL)) radii.tl = clampR(aTL);
+            if (atTop && atRight && canFit(aTR)) radii.tr = clampR(aTR);
+            if (atBottom && atRight && canFit(aBR)) radii.br = clampR(aBR);
+            if (atBottom && atLeft && canFit(aBL)) radii.bl = clampR(aBL);
+
+            if (radii.tl > 0 || radii.tr > 0 || radii.br > 0 || radii.bl > 0) break;
           }
+          // No radius on this clipping ancestor, continue searching up
         }
+        ancestor = ancestor.parentElement;
       }
     }
 

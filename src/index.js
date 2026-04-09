@@ -109,6 +109,10 @@ export async function exportToPptx(target, options = {}) {
     const fontDataArr = await Promise.all(
       fontsToEmbed.map(async (fontCfg) => {
         try {
+          // Pre-resolved buffer (e.g. full TTF from GitHub)
+          if (fontCfg.buffer) {
+            return { name: fontCfg.name, buffer: fontCfg.buffer, type: fontCfg.type || 'ttf' };
+          }
           const ext = fontCfg.url.split('.').pop().split(/[?#]/)[0].toLowerCase();
           const response = await fetch(fontCfg.url);
           if (!response.ok) throw new Error(`Failed to fetch ${fontCfg.url}`);
@@ -138,7 +142,8 @@ export async function exportToPptx(target, options = {}) {
   }
 
   // 5. Post-process: Handle dual-font (Latin + EA) fontFace JSON strings
-  finalBlob = await postProcessDualFonts(finalBlob);
+  const embeddedFontNames = fontsToEmbed.map((f) => f.name);
+  finalBlob = await postProcessDualFonts(finalBlob, { embeddedFontNames });
 
   // 4. Output Handling
   // If skipDownload is NOT true, proceed with browser download
@@ -332,7 +337,7 @@ async function processSlide(root, slide, pptx, globalOptions = {}) {
     if (result) {
       if (result.items) {
         for (const item of result.items) {
-          item.stackChain = currentStackChain;
+          if (!item.stackChain) item.stackChain = currentStackChain;
         }
         renderQueue.push(...result.items);
       }

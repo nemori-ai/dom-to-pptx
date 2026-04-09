@@ -2,7 +2,14 @@
 // Renderer for TABLE elements
 
 import { ElementRenderer, PX_TO_INCH } from './base.js';
-import { extractTableData, parseColor, getTextStyle, LAYER } from '../utils/index.js';
+import {
+  extractTableData,
+  parseColor,
+  getTextStyle,
+  blendColors,
+  getEffectiveBackground,
+  LAYER,
+} from '../utils/index.js';
 import { PX_TO_PT } from '../utils/constants.js';
 
 function isStyledTable(tableNode) {
@@ -42,7 +49,13 @@ function renderStyledTable(node, config, domOrder, dims, globalOptions) {
       const cw = cellRect.width * PX_TO_INCH * scale;
       const ch = cellRect.height * PX_TO_INCH * scale;
 
-      const bgColor = parseColor(style.backgroundColor);
+      let bgColor = parseColor(style.backgroundColor);
+      if (bgColor.hex && bgColor.opacity > 0 && bgColor.opacity < 1) {
+        const effBg = getEffectiveBackground(cell, globalOptions?.backgroundSnapshot);
+        if (effBg.hex) {
+          bgColor = blendColors(bgColor.hex, bgColor.opacity, effBg.hex);
+        }
+      }
       const hasBg = bgColor.hex && bgColor.opacity > 0;
 
       const radius = parseFloat(style.borderRadius) || 0;

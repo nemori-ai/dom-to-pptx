@@ -30,6 +30,87 @@ export class SVGRenderer extends ElementRenderer {
       y = dims.y,
       w = dims.w,
       h = dims.h;
+    const hasRotation = dims.rotation !== 0;
+
+    // Rotated + clipped SVG: bake rotation into the rasterised image so the
+    // bounding-box-space crop rect clips correctly, then place with rotate=0.
+    if (clipInfo && hasRotation) {
+      const nr = clipInfo.nodeRect;
+      const cr = clipInfo.clipRect;
+      const visLeft = Math.max(nr.left, cr.left);
+      const visTop = Math.max(nr.top, cr.top);
+      const visRight = Math.min(nr.right, cr.right);
+      const visBottom = Math.min(nr.bottom, cr.bottom);
+      const cropW = visRight - visLeft;
+      const cropH = visBottom - visTop;
+      if (cropW <= 0 || cropH <= 0) return { items: [], stopRecursion: true };
+
+      const cropX = visLeft - nr.left;
+      const cropY = visTop - nr.top;
+
+      x = config.offX + (visLeft - config.rootX) * PX_TO_INCH * config.scale;
+      y = config.offY + (visTop - config.rootY) * PX_TO_INCH * config.scale;
+      w = cropW * PX_TO_INCH * config.scale;
+      h = cropH * PX_TO_INCH * config.scale;
+
+      const item = {
+        type: 'image',
+        layer: LAYER.CONTENT,
+        domOrder,
+        options: {
+          data: null,
+          x,
+          y,
+          w,
+          h,
+          rotate: 0, // rotation is baked into the rasterised image
+          ...(transparency !== undefined && { transparency }),
+          ...(hyperlink && { hyperlink }),
+        },
+      };
+
+      const job = async () => {
+        const scale = globalOptions.imageScaleConfig?.svg ?? 3;
+        // Step 1: rasterise SVG at its pre-rotation layout size (unrotated)
+        const pngResult = await svgToPng(node, scale);
+        if (!pngResult) {
+          item.skip = true;
+          return;
+        }
+
+        const layoutW = dims.widthPx;
+        const layoutH = dims.heightPx;
+        const boundW = dims.rect.width;
+        const boundH = dims.rect.height;
+        const angleRad = (dims.rotation * Math.PI) / 180;
+
+        // Step 2: draw the unrotated image onto a crop-sized canvas with
+        // the CSS rotation applied, so the result matches on-screen appearance
+        const img = new Image();
+        img.src = pngResult.data;
+        await new Promise((resolve) => {
+          img.onload = resolve;
+          img.onerror = () => resolve();
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(cropW * scale);
+        canvas.height = Math.ceil(cropH * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.scale(scale, scale);
+
+        // Bounding-rect centre relative to the crop area
+        const cx = boundW / 2 - cropX;
+        const cy = boundH / 2 - cropY;
+        ctx.translate(cx, cy);
+        ctx.rotate(angleRad);
+        ctx.drawImage(img, -layoutW / 2, -layoutH / 2, layoutW, layoutH);
+
+        item.options.data = canvas.toDataURL('image/png');
+      };
+
+      return { items: [item], job, stopRecursion: true };
+    }
 
     if (clipInfo) {
       const nr = clipInfo.nodeRect;

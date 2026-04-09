@@ -14,19 +14,40 @@ import { parseColor, getClippingAncestor } from '../utils/index.js';
  * @returns {Object} { borderTopLeftRadius, borderTopRightRadius, borderBottomRightRadius, borderBottomLeftRadius, allCornersEqual, borderRadiusValue, hasPartialBorderRadius }
  */
 export function computeBorderRadii(node, style, widthPx, heightPx) {
-  const maxRadius = Math.min(widthPx, heightPx) / 2;
-  const clampRadius = (r) => Math.min(r, maxRadius);
-
   const resolveRadius = (val, dimPx) => {
     if (!val) return 0;
     if (val.includes('%')) return (parseFloat(val) / 100) * dimPx;
     return parseFloat(val) || 0;
   };
 
-  let borderTopLeftRadius = clampRadius(resolveRadius(style.borderTopLeftRadius, widthPx));
-  let borderTopRightRadius = clampRadius(resolveRadius(style.borderTopRightRadius, widthPx));
-  let borderBottomRightRadius = clampRadius(resolveRadius(style.borderBottomRightRadius, widthPx));
-  let borderBottomLeftRadius = clampRadius(resolveRadius(style.borderBottomLeftRadius, widthPx));
+  let borderTopLeftRadius = resolveRadius(style.borderTopLeftRadius, widthPx);
+  let borderTopRightRadius = resolveRadius(style.borderTopRightRadius, widthPx);
+  let borderBottomRightRadius = resolveRadius(style.borderBottomRightRadius, widthPx);
+  let borderBottomLeftRadius = resolveRadius(style.borderBottomLeftRadius, widthPx);
+
+  // CSS spec §5.5: when the sum of adjacent radii exceeds a side's length,
+  // all radii are scaled down by the same factor so every side fits.
+  // Only consider sides where both adjacent corners have a radius (sum > 0).
+  const sums = [
+    borderTopLeftRadius + borderTopRightRadius,     // top edge
+    borderBottomLeftRadius + borderBottomRightRadius, // bottom edge
+    borderTopLeftRadius + borderBottomLeftRadius,     // left edge
+    borderTopRightRadius + borderBottomRightRadius,   // right edge
+  ];
+  const dims = [widthPx, widthPx, heightPx, heightPx];
+  let f = 1;
+  for (let i = 0; i < 4; i++) {
+    if (sums[i] > 0) f = Math.min(f, dims[i] / sums[i]);
+  }
+  if (f < 1) {
+    borderTopLeftRadius *= f;
+    borderTopRightRadius *= f;
+    borderBottomRightRadius *= f;
+    borderBottomLeftRadius *= f;
+  }
+
+  // Helper for inherited radius clamping below (simple per-dimension limit)
+  const clampRadius = (r) => Math.min(r, widthPx, heightPx);
 
   let allCornersEqual =
     borderTopLeftRadius === borderTopRightRadius &&
@@ -41,10 +62,13 @@ export function computeBorderRadii(node, style, widthPx, heightPx) {
     borderBottomLeftRadius > 0;
 
   // Inherit clipping ancestor's border-radius for edges that align
-  // (PPTX has no parent-child clipping, so children must self-clip)
+  // (PPTX has no parent-child clipping, so children must self-clip).
+  // Walk past intermediate clipping ancestors that have no radius
+  // (e.g. an overflow:hidden wrapper between the element and the
+  // rounded-corner card) to find the one that actually clips corners.
   if (borderRadiusValue === 0 && !hasOwnRadius) {
-    const clipAnc = getClippingAncestor(node);
-    if (clipAnc) {
+    let clipAnc = getClippingAncestor(node);
+    while (clipAnc) {
       const ps = window.getComputedStyle(clipAnc);
       const pTL = parseFloat(ps.borderTopLeftRadius) || 0;
       const pTR = parseFloat(ps.borderTopRightRadius) || 0;
@@ -78,7 +102,10 @@ export function computeBorderRadii(node, style, widthPx, heightPx) {
           allCornersEqual = iTL === iTR && iTR === iBR && iBR === iBL;
           borderRadiusValue = allCornersEqual ? iTL : 0;
         }
+        break; // Found ancestor with radius, stop searching
       }
+      // No radius on this clipping ancestor, continue up
+      clipAnc = getClippingAncestor(clipAnc);
     }
   }
 

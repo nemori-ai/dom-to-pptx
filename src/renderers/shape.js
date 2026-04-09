@@ -18,6 +18,7 @@ import {
   getFlip,
   generateBlurredSVG,
   getClipInfo,
+  hasSkewTransform,
   LAYER,
 } from '../utils/index.js';
 import { elementToCanvasImage, captureGradientText, collectPseudoElementItems } from './helpers.js';
@@ -248,6 +249,71 @@ export class ShapeRenderer extends ElementRenderer {
       };
 
       return { items: [item], job, stopRecursion: true };
+    }
+
+    // --- Skew Transform: PPTX has no native skew, render via SVG ---
+    // Build an SVG with the CSS transform matrix applied so the skewed shape
+    // is rasterized correctly as an image in PPTX.
+    if (!isRootElement && hasSkewTransform(style.transform)) {
+      const rect = node.getBoundingClientRect();
+      const skewW = rect.width * PX_TO_INCH * config.scale;
+      const skewH = rect.height * PX_TO_INCH * config.scale;
+      const skewX = config.offX + (rect.left - config.rootX) * PX_TO_INCH * config.scale;
+      const skewY = config.offY + (rect.top - config.rootY) * PX_TO_INCH * config.scale;
+
+      const fillColor = bgColorObj.hex ? '#' + bgColorObj.hex : 'transparent';
+      const fillOpacity = safeOpacity * bgColorObj.opacity;
+
+      // Parse the CSS matrix(a,b,c,d,e,f) to extract just the a,b,c,d components.
+      // e,f (translate) are already accounted for by getBoundingClientRect() positioning.
+      const matrixMatch = style.transform.match(/matrix\(([^)]+)\)/);
+      if (matrixMatch && fillColor !== 'transparent') {
+        const vals = matrixMatch[1].split(',').map((v) => parseFloat(v.trim()));
+        const [a, b, c, d] = vals;
+
+        // The bounding rect is the AABB of the transformed shape.
+        // To place the original rect inside the SVG so the transformed version
+        // fits within the bounding rect, compute the origin offset.
+        // CSS transforms around center by default: transform-origin is 50% 50%.
+        const cx = widthPx / 2;
+        const cy = heightPx / 2;
+        // After applying matrix [a,b,c,d] around center, the new center stays at
+        // (cx, cy) but the corners shift. The bounding rect left/top offset from
+        // the original left/top equals: (rect.width - widthPx) / 2 for x, etc.
+        // So we draw the rect at that offset and apply transform around its center.
+        const ox = (rect.width - widthPx) / 2;
+        const oy = (rect.height - heightPx) / 2;
+        const svgW = Math.ceil(rect.width);
+        const svgH = Math.ceil(rect.height);
+        const tcx = ox + cx;
+        const tcy = oy + cy;
+
+        const svgStr =
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}">` +
+          `<rect x="${ox}" y="${oy}" width="${widthPx}" height="${heightPx}" ` +
+          `fill="${fillColor}" fill-opacity="${fillOpacity}" ` +
+          `transform="matrix(${a},${b},${c},${d},` +
+          `${tcx - (a * tcx + c * tcy)},${tcy - (b * tcx + d * tcy)})"/>` +
+          `</svg>`;
+
+        const svgData = 'data:image/svg+xml;base64,' + btoa(svgStr);
+
+        items.push({
+          type: 'image',
+          layer: LAYER.BACKGROUND,
+          domOrder,
+          options: {
+            data: svgData,
+            x: skewX,
+            y: skewY,
+            w: skewW,
+            h: skewH,
+            ...(shapeHyperlink && { hyperlink: shapeHyperlink }),
+          },
+        });
+
+        return { items, stopRecursion: !hasMeaningfulChildren };
+      }
     }
 
     if (isGradientBorder) {
@@ -503,8 +569,8 @@ export class ShapeRenderer extends ElementRenderer {
       }
       if (textPayload) {
         const ep = textPayload.extraPadding || { left: 0, top: 0, right: 0, bottom: 0 };
-        // Use inches directly — avoids PptxGenJS margin[0]>=1 heuristic bug
-        const insetIn = textPayload.inset;
+        // PptxGenJS margin expects points (valToPts multiplies by 12700 EMU/pt)
+        const insetPt = textPayload.inset * 72;
         items.push({
           type: 'text',
           layer: LAYER.CONTENT,
@@ -517,7 +583,7 @@ export class ShapeRenderer extends ElementRenderer {
             h: h - ep.top - ep.bottom,
             align: textPayload.align,
             valign: textPayload.valign,
-            margin: [insetIn, insetIn, insetIn, insetIn],
+            margin: [insetPt, insetPt, insetPt, insetPt],
             rotate: rotation,
             wrap: true,
             autoFit: false,
@@ -540,11 +606,21 @@ export class ShapeRenderer extends ElementRenderer {
         bgData = svgInfo.data;
         padIn = svgInfo.padding * PX_TO_INCH * config.scale;
       } else {
+        // Pass per-corner radii when they differ, so the SVG path renders
+        // the correct shape (e.g. rounded-bl-full produces a quarter circle).
+        const gradRadius = hasPartialBorderRadius
+          ? {
+              tl: borderTopLeftRadius,
+              tr: borderTopRightRadius,
+              br: borderBottomRightRadius,
+              bl: borderBottomLeftRadius,
+            }
+          : borderRadiusValue;
         bgData = generateGradientSVG(
           widthPx,
           heightPx,
           style.backgroundImage,
-          borderRadiusValue,
+          gradRadius,
           null
         );
       }
@@ -612,8 +688,8 @@ export class ShapeRenderer extends ElementRenderer {
           textH -= halfLeadingIn;
         }
 
-        // Use inches directly — avoids PptxGenJS margin[0]>=1 heuristic bug
-        const insetIn = textPayload.inset;
+        // PptxGenJS margin expects points (valToPts multiplies by 12700 EMU/pt)
+        const insetPt = textPayload.inset * 72;
         items.push({
           type: 'text',
           layer: LAYER.CONTENT,
@@ -626,7 +702,7 @@ export class ShapeRenderer extends ElementRenderer {
             h: textH,
             align: textPayload.align,
             valign: textPayload.valign,
-            margin: [insetIn, insetIn, insetIn, insetIn],
+            margin: [insetPt, insetPt, insetPt, insetPt],
             rotate: rotation,
             wrap: !isSingleLine,
             autoFit: false,
@@ -668,6 +744,11 @@ export class ShapeRenderer extends ElementRenderer {
       const transparency = (1 - finalAlpha) * 100;
       const useSolidFill = bgColorObj.hex && !isImageWrapper;
 
+      // Root element background must sort behind ALL children, including negative
+      // z-index decorative elements.  Give it a -Infinity stackChain entry so it
+      // always wins the "paint first" comparison in compareStackChains().
+      const rootBgChain = isRootElement ? [[-Infinity, -Infinity]] : undefined;
+
       if (hasPartialBorderRadius && useSolidFill && !textPayload && !partialRadiusBgRendered) {
         const shapeSvg = generateCustomShapeSVG(
           widthPx,
@@ -686,6 +767,7 @@ export class ShapeRenderer extends ElementRenderer {
           type: 'image',
           layer: LAYER.BACKGROUND,
           domOrder,
+          ...(rootBgChain && { stackChain: rootBgChain }),
           options: {
             data: shapeSvg,
             x,
@@ -752,6 +834,7 @@ export class ShapeRenderer extends ElementRenderer {
             type: 'shape',
             layer: LAYER.BACKGROUND,
             domOrder: domOrder - 0.5,
+            ...(rootBgChain && { stackChain: rootBgChain }),
             shapeType,
             options: {
               x: x - spreadIn,
@@ -785,6 +868,7 @@ export class ShapeRenderer extends ElementRenderer {
                 type: 'shape',
                 layer: LAYER.BACKGROUND,
                 domOrder,
+                ...(rootBgChain && { stackChain: rootBgChain }),
                 shapeType,
                 options: shapeOpts,
               });
@@ -795,8 +879,8 @@ export class ShapeRenderer extends ElementRenderer {
             let textW = w - ep.left - ep.right;
             let textH = h - ep.top - ep.bottom - halfLeadingIn;
 
-            // Use inches directly — avoids PptxGenJS margin[0]>=1 heuristic bug
-        const insetIn = textPayload.inset;
+            // PptxGenJS margin expects points (valToPts multiplies by 12700 EMU/pt)
+            const insetPt = textPayload.inset * 72;
             items.push({
               type: 'text',
               layer: LAYER.CONTENT,
@@ -809,22 +893,22 @@ export class ShapeRenderer extends ElementRenderer {
                 h: textH,
                 align: textPayload.align,
                 valign: textPayload.valign,
-                margin: [insetIn, insetIn, insetIn, insetIn],
+                margin: [insetPt, insetPt, insetPt, insetPt],
                 rotate: rotation,
                 wrap: !isSingleLine,
                 autoFit: false,
               },
             });
           } else {
-            // Use inches directly — avoids PptxGenJS margin[0]>=1 heuristic bug
-            const uniformInsetIn = textPayload.inset;
+            // PptxGenJS margin expects points (valToPts multiplies by 12700 EMU/pt)
+            const uniformInsetPt = textPayload.inset * 72;
             const textOptions = {
               shape: shapeType,
               ...shapeOpts,
               rotate: rotation,
               align: textPayload.align,
               valign: textPayload.valign,
-              margin: [uniformInsetIn, uniformInsetIn, uniformInsetIn, uniformInsetIn],
+              margin: [uniformInsetPt, uniformInsetPt, uniformInsetPt, uniformInsetPt],
               wrap: true,
               autoFit: false,
             };
@@ -841,6 +925,7 @@ export class ShapeRenderer extends ElementRenderer {
             type: 'shape',
             layer: LAYER.BACKGROUND,
             domOrder,
+            ...(rootBgChain && { stackChain: rootBgChain }),
             shapeType,
             options: shapeOpts,
           });

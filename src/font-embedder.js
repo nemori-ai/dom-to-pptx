@@ -1,6 +1,38 @@
 // src/font-embedder.js
 import { fontToEot } from './font-utils.js';
 
+/**
+ * Extract font metadata from an EOT buffer for OOXML font embedding.
+ * EOT header has panose at offset 16 (10 bytes), weight at 28, etc.
+ * Returns { panose, pitchFamily, charset } or null if not found.
+ */
+function extractFontMeta(eotBuffer) {
+  try {
+    const data = new DataView(eotBuffer);
+    // Verify EOT magic "LP" at offset 34
+    if (data.getUint16(34, true) !== 0x504c) return null;
+
+    // panose: 10 bytes at EOT offset 16
+    const panoseBytes = new Uint8Array(eotBuffer, 16, 10);
+    const panose = Array.from(panoseBytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+
+    // Detect fixed-pitch from panose byte 4 (proportion: 9 = monospaced)
+    const isFixedPitch = panoseBytes[3] === 9;
+    const pitch = isFixedPitch ? 1 : 2;
+    // Use FF_MODERN (3) for monospaced fonts, FF_SWISS (2) for proportional
+    const family = isFixedPitch ? 3 : 2;
+    const pitchFamily = (family << 4) | pitch;
+
+    return { panose, pitchFamily: String(pitchFamily), charset: '0' };
+  } catch {
+    // Ignore parse errors
+  }
+  return null;
+}
+
 export class PPTXEmbedFonts {
   constructor() {
     this.zip = null;
@@ -31,9 +63,13 @@ export class PPTXEmbedFonts {
   }
 
   async addFont(fontFace, fontBuffer, type, opts = {}) {
+    // Deduplicate: only embed one file per font family name
+    if (this.fonts.some((f) => f.name === fontFace)) return;
+
     const eotData = await fontToEot(type, fontBuffer, opts);
     const rid = this.nextRId++;
-    this.fonts.push({ name: fontFace, data: eotData, rid });
+    const meta = extractFontMeta(eotData);
+    this.fonts.push({ name: fontFace, data: eotData, rid, meta });
   }
 
   async updateFiles() {
@@ -41,6 +77,7 @@ export class PPTXEmbedFonts {
     await this.updatePresentationXML();
     await this.updateRelsPresentationXML();
     this.updateFontFiles();
+    await this.updateSlidesFontRefs();
   }
 
   async generateBlob() {
@@ -68,7 +105,7 @@ export class PPTXEmbedFonts {
     const hasFntData = defaults.some((el) => el.getAttribute('Extension') === 'fntdata');
 
     if (!hasFntData) {
-      const el = doc.createElement('Default');
+      const el = doc.createElementNS(types.namespaceURI, 'Default');
       el.setAttribute('Extension', 'fntdata');
       el.setAttribute('ContentType', 'application/x-fontdata');
       types.insertBefore(el, types.firstChild);
@@ -86,6 +123,9 @@ export class PPTXEmbedFonts {
     const doc = parser.parseFromString(xmlStr, 'text/xml');
     const presentation = doc.getElementsByTagName('p:presentation')[0];
 
+    const NS_P = 'http://schemas.openxmlformats.org/presentationml/2006/main';
+    const NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+
     // Enable embedding flags
     presentation.setAttribute('saveSubsetFonts', 'true');
     presentation.setAttribute('embedTrueTypeFonts', 'true');
@@ -94,7 +134,7 @@ export class PPTXEmbedFonts {
     let embeddedFontLst = presentation.getElementsByTagName('p:embeddedFontLst')[0];
 
     if (!embeddedFontLst) {
-      embeddedFontLst = doc.createElement('p:embeddedFontLst');
+      embeddedFontLst = doc.createElementNS(NS_P, 'p:embeddedFontLst');
 
       // Insert before defaultTextStyle or at end
       const defaultTextStyle = presentation.getElementsByTagName('p:defaultTextStyle')[0];
@@ -113,14 +153,19 @@ export class PPTXEmbedFonts {
       );
 
       if (!existing) {
-        const embedFont = doc.createElement('p:embeddedFont');
+        const embedFont = doc.createElementNS(NS_P, 'p:embeddedFont');
 
-        const fontNode = doc.createElement('p:font');
+        const fontNode = doc.createElementNS(NS_P, 'p:font');
         fontNode.setAttribute('typeface', font.name);
+        if (font.meta) {
+          fontNode.setAttribute('panose', font.meta.panose);
+          fontNode.setAttribute('pitchFamily', font.meta.pitchFamily);
+          fontNode.setAttribute('charset', font.meta.charset);
+        }
         embedFont.appendChild(fontNode);
 
-        const regular = doc.createElement('p:regular');
-        regular.setAttribute('r:id', `rId${font.rid}`);
+        const regular = doc.createElementNS(NS_P, 'p:regular');
+        regular.setAttributeNS(NS_R, 'r:id', `rId${font.rid}`);
         embedFont.appendChild(regular);
 
         embeddedFontLst.appendChild(embedFont);
@@ -138,9 +183,10 @@ export class PPTXEmbedFonts {
     const parser = new DOMParser();
     const doc = parser.parseFromString(xmlStr, 'text/xml');
     const relationships = doc.getElementsByTagName('Relationships')[0];
+    const NS_RELS = relationships.namespaceURI;
 
     this.fonts.forEach((font) => {
-      const rel = doc.createElement('Relationship');
+      const rel = doc.createElementNS(NS_RELS, 'Relationship');
       rel.setAttribute('Id', `rId${font.rid}`);
       rel.setAttribute('Target', `fonts/${font.rid}.fntdata`);
       rel.setAttribute(
@@ -157,5 +203,57 @@ export class PPTXEmbedFonts {
     this.fonts.forEach((font) => {
       this.zip.file(`ppt/fonts/${font.rid}.fntdata`, font.data);
     });
+  }
+
+  /**
+   * Post-process slide XML to add panose/pitchFamily/charset to font refs
+   * (a:latin, a:ea, a:cs) that match embedded font names.
+   * PowerPoint requires these attributes on text run font refs to use embedded fonts.
+   *
+   * Note: postProcessDualFonts() runs after generateBlob() and strips pitchFamily/charset
+   * from non-embedded fonts. Embedded fonts survive because: (1) embeddedFontNames opt-out
+   * prevents stripping, and (2) the panose attribute we add here makes the stripping regex
+   * not match (it expects pitchFamily immediately after typeface, but panose is in between).
+   */
+  async updateSlidesFontRefs() {
+    // Build lookup: fontName -> meta
+    const metaMap = {};
+    for (const font of this.fonts) {
+      if (font.meta) metaMap[font.name] = font.meta;
+    }
+    if (Object.keys(metaMap).length === 0) return;
+
+    const slideFiles = Object.keys(this.zip.files).filter(
+      (f) => f.startsWith('ppt/slides/slide') && f.endsWith('.xml')
+    );
+
+    for (const path of slideFiles) {
+      const file = this.zip.file(path);
+      if (!file) continue;
+
+      let xmlStr = await file.async('string');
+      let modified = false;
+
+      for (const [fontName, meta] of Object.entries(metaMap)) {
+        // Match <a:latin typeface="FontName" .../> or <a:ea typeface="FontName" .../>
+        // that don't already have panose attribute. Allow other attrs between typeface and />
+        const escaped = fontName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(
+          `(<a:(?:latin|ea|cs)\\s+typeface="${escaped}")([^>]*?)(/?>)`,
+          'g'
+        );
+        xmlStr = xmlStr.replace(re, (match, prefix, middle, suffix) => {
+          if (match.includes('panose=')) return match;
+          modified = true;
+          // Replace any existing pitchFamily/charset with correct values, then add panose
+          let attrs = middle.replace(/\s+pitchFamily="[^"]*"/g, '').replace(/\s+charset="[^"]*"/g, '');
+          return `${prefix} panose="${meta.panose}" pitchFamily="${meta.pitchFamily}" charset="${meta.charset}"${attrs}${suffix}`;
+        });
+      }
+
+      if (modified) {
+        this.zip.file(path, xmlStr);
+      }
+    }
   }
 }

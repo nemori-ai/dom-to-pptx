@@ -122,9 +122,11 @@ function processDualFontsInXml(content) {
  *   <a:latin typeface="Arial"/><a:ea typeface="Microsoft YaHei"/>
  *
  * @param {Blob} blob - The PPTX blob to process
+ * @param {Object} [options] - Options
+ * @param {string[]} [options.embeddedFontNames] - Font names that are embedded (keep their pitchFamily/charset)
  * @returns {Promise<Blob>} - The processed PPTX blob
  */
-export async function postProcessDualFonts(blob) {
+export async function postProcessDualFonts(blob, options = {}) {
   const zip = await JSZip.loadAsync(blob);
   let modified = false;
 
@@ -149,13 +151,18 @@ export async function postProcessDualFonts(blob) {
       fileModified = true;
     }
 
-    // Strip pitchFamily and charset from font elements (a:latin, a:ea, a:cs).
+    // Strip pitchFamily and charset from font elements (a:latin, a:ea, a:cs)
+    // EXCEPT for embedded fonts which need these attributes for PowerPoint to match them.
     // PptxGenJS hardcodes these values which can cause PowerPoint (especially Mac)
-    // to reject or mismap fonts. Letting PowerPoint resolve by typeface alone is safer.
+    // to reject or mismap non-embedded fonts. Letting PowerPoint resolve by typeface alone is safer.
     {
+      const embeddedNames = new Set(options.embeddedFontNames || []);
       const stripped = content.replace(
-        /(<a:(?:latin|ea|cs)\s+typeface="[^"]*")\s+pitchFamily="[^"]*"\s*charset="[^"]*"/g,
-        '$1'
+        /(<a:(?:latin|ea|cs)\s+typeface="([^"]*)")\s+pitchFamily="[^"]*"\s*charset="[^"]*"/g,
+        (match, prefix, fontName) => {
+          if (embeddedNames.has(fontName)) return match; // keep for embedded fonts
+          return prefix;
+        }
       );
       if (stripped !== content) {
         content = stripped;
