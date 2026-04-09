@@ -75,7 +75,7 @@ async function resolveGoogleFontsFullTTF(usedFamilies) {
   // Falls back to apache/ and ufl/ directories if ofl/ fails.
   const GITHUB_BASE = 'https://raw.githubusercontent.com/google/fonts/main';
   const LICENSE_DIRS = ['ofl', 'apache', 'ufl'];
-  const FETCH_TIMEOUT = 5000;
+  const FETCH_TIMEOUT = 60000;
 
   const fetchWithTimeout = (url) => {
     const controller = new AbortController();
@@ -180,9 +180,16 @@ export async function getAutoDetectedFonts(usedFamilies) {
   const googleFullFonts = await resolveGoogleFontsFullTTF(usedFamilies);
   for (const font of foundFonts) {
     const fullFont = googleFullFonts.get(font.name);
-    if (fullFont) {
+    if (fullFont && fullFont.buffer) {
       font.buffer = fullFont.buffer;
       font.type = fullFont.type;
+    }
+  }
+
+  // Add Google Fonts that weren't found via @font-face scanning (e.g. CORS blocked)
+  for (const [name, data] of googleFullFonts) {
+    if (data.buffer && !foundFonts.some((f) => f.name === name)) {
+      foundFonts.push({ name, buffer: data.buffer, type: data.type });
     }
   }
 
