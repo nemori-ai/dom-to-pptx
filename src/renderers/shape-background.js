@@ -16,15 +16,17 @@ export function checkComplexChildren(node) {
     const cs = window.getComputedStyle(child);
     const childBgImage = cs.backgroundImage || '';
     const childBgSize = cs.backgroundSize || '';
-    const childBlendMode = cs.mixBlendMode || 'normal';
     const childHasTiled =
       childBgImage.includes('gradient') &&
       childBgSize !== '' &&
       childBgSize !== 'auto' &&
       childBgSize !== 'cover' &&
       childBgSize !== 'contain';
-    const childHasBlendMode = childBlendMode !== 'normal';
-    return childHasTiled || childBgImage.includes('repeating-') || childHasBlendMode;
+    // Note: mix-blend-mode is intentionally excluded from triggering canvas
+    // capture. PPTX has no native blend mode support, so capturing via canvas
+    // only loses fidelity (especially when children contain cross-origin images
+    // that taint the canvas). Rendering children individually is more reliable.
+    return childHasTiled || childBgImage.includes('repeating-');
   });
 }
 
@@ -69,10 +71,15 @@ export function checkNeedsCanvasCapture({
     !isRootElement &&
     (style.overflow === 'hidden' || style.overflow === 'clip' || getClipInfo(node));
 
+  // Skip canvas capture when the container has <img> children with external
+  // sources — cross-origin images taint the canvas, making toDataURL() fail.
+  // Rendering children individually is more reliable in this case.
+  const hasExternalImages = node.querySelector && node.querySelector('img[src^="http"]');
+
   return (
-    (hasPartialBorderRadius && getClipInfo(node)) ||
-    (hasPartialBorderRadius && checkComplexChildren(node)) ||
-    (hasClippingBehavior && checkComplexChildren(node)) ||
+    (hasPartialBorderRadius && getClipInfo(node) && !hasExternalImages) ||
+    (hasPartialBorderRadius && checkComplexChildren(node) && !hasExternalImages) ||
+    (hasClippingBehavior && checkComplexChildren(node) && !hasExternalImages) ||
     (!isRootElement && hasMultipleGradients) ||
     (!isRootElement && hasRepeatingGradient) ||
     (!isRootElement && hasTiledBackground)

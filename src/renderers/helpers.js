@@ -864,11 +864,13 @@ export function collectPseudoElementItems(
         h: pH > 0 ? pH : estTextH,
         align: textAlign,
         valign: 'middle',
+        // Pass margin in inches so PptxGenJS always uses inch2Emu
+        // (avoids its margin[0] >= 1 heuristic misinterpreting points as inches)
         margin: [
-          padT * config.scale * 72 * PX_TO_INCH,
-          padR * config.scale * 72 * PX_TO_INCH,
-          padB * config.scale * 72 * PX_TO_INCH,
-          padL * config.scale * 72 * PX_TO_INCH,
+          padT * PX_TO_INCH * config.scale,
+          padR * PX_TO_INCH * config.scale,
+          padB * PX_TO_INCH * config.scale,
+          padL * PX_TO_INCH * config.scale,
         ],
         wrap: false,
         autoFit: false,

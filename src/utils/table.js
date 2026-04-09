@@ -110,8 +110,10 @@ export function extractTableData(node, scale, globalOptions = {}) {
           const childStyle = window.getComputedStyle(firstChild);
           const childBg = parseColor(childStyle.backgroundColor);
           if (childBg.hex && childBg.opacity > 0) {
+            // Use the badge's text styling (color, font) but don't fill the
+            // entire cell with the badge background — native PPTX table cells
+            // can't render a small rounded pill inside a cell.
             badgeStyle = { bg: childBg, textStyle: childStyle, node: firstChild };
-            fill = { color: childBg.hex };
           }
         }
       }
@@ -131,15 +133,17 @@ export function extractTableData(node, scale, globalOptions = {}) {
       if (style.verticalAlign === 'bottom') valign = 'bottom';
 
       // D. Padding (Margins in PPTX)
-      // CSS Padding px -> PPTX Margin pt
       const padding = getPadding(style, scale);
-      // getPadding returns { top, right, bottom, left, inset } in inches relative to scale
-      // PptxGenJS expects points (pt) for margin: [t, r, b, l]
+      // getPadding returns { top, right, bottom, left, inset } in inches (scaled).
+      // PptxGenJS margin uses a heuristic: if margin[0] >= 1, values are treated as
+      // points (via valToPts); otherwise as inches (via inch2Emu).
+      // Pass values in inches to avoid the heuristic misinterpreting zero top-padding
+      // as "all values are inches" when they were meant to be points.
       const margin = [
-        padding.top * 72, // top
-        padding.right * 72, // right
-        padding.bottom * 72, // bottom
-        padding.left * 72, // left
+        padding.top, // top (inches)
+        padding.right, // right (inches)
+        padding.bottom, // bottom (inches)
+        padding.left, // left (inches)
       ];
 
       // E. Borders - use { type: 'none' } to explicitly disable borders

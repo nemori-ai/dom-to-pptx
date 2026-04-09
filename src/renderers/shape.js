@@ -503,7 +503,8 @@ export class ShapeRenderer extends ElementRenderer {
       }
       if (textPayload) {
         const ep = textPayload.extraPadding || { left: 0, top: 0, right: 0, bottom: 0 };
-        const insetPt = textPayload.inset * 72;
+        // Use inches directly — avoids PptxGenJS margin[0]>=1 heuristic bug
+        const insetIn = textPayload.inset;
         items.push({
           type: 'text',
           layer: LAYER.CONTENT,
@@ -516,7 +517,7 @@ export class ShapeRenderer extends ElementRenderer {
             h: h - ep.top - ep.bottom,
             align: textPayload.align,
             valign: textPayload.valign,
-            margin: [insetPt, insetPt, insetPt, insetPt],
+            margin: [insetIn, insetIn, insetIn, insetIn],
             rotate: rotation,
             wrap: true,
             autoFit: false,
@@ -611,7 +612,8 @@ export class ShapeRenderer extends ElementRenderer {
           textH -= halfLeadingIn;
         }
 
-        const insetPt = textPayload.inset * 72;
+        // Use inches directly — avoids PptxGenJS margin[0]>=1 heuristic bug
+        const insetIn = textPayload.inset;
         items.push({
           type: 'text',
           layer: LAYER.CONTENT,
@@ -624,7 +626,7 @@ export class ShapeRenderer extends ElementRenderer {
             h: textH,
             align: textPayload.align,
             valign: textPayload.valign,
-            margin: [insetPt, insetPt, insetPt, insetPt],
+            margin: [insetIn, insetIn, insetIn, insetIn],
             rotate: rotation,
             wrap: !isSingleLine,
             autoFit: false,
@@ -793,7 +795,8 @@ export class ShapeRenderer extends ElementRenderer {
             let textW = w - ep.left - ep.right;
             let textH = h - ep.top - ep.bottom - halfLeadingIn;
 
-            const insetPt = textPayload.inset * 72;
+            // Use inches directly — avoids PptxGenJS margin[0]>=1 heuristic bug
+        const insetIn = textPayload.inset;
             items.push({
               type: 'text',
               layer: LAYER.CONTENT,
@@ -806,21 +809,22 @@ export class ShapeRenderer extends ElementRenderer {
                 h: textH,
                 align: textPayload.align,
                 valign: textPayload.valign,
-                margin: [insetPt, insetPt, insetPt, insetPt],
+                margin: [insetIn, insetIn, insetIn, insetIn],
                 rotate: rotation,
                 wrap: !isSingleLine,
                 autoFit: false,
               },
             });
           } else {
-            const uniformInsetPt = textPayload.inset * 72;
+            // Use inches directly — avoids PptxGenJS margin[0]>=1 heuristic bug
+            const uniformInsetIn = textPayload.inset;
             const textOptions = {
               shape: shapeType,
               ...shapeOpts,
               rotate: rotation,
               align: textPayload.align,
               valign: textPayload.valign,
-              margin: [uniformInsetPt, uniformInsetPt, uniformInsetPt, uniformInsetPt],
+              margin: [uniformInsetIn, uniformInsetIn, uniformInsetIn, uniformInsetIn],
               wrap: true,
               autoFit: false,
             };

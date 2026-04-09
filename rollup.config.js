@@ -44,7 +44,7 @@ const configLibrary = {
     json(),
   ],
   // Mark all dependencies as external so they aren't bundled into the .mjs/.cjs files
-  external: ['pptxgenjs', 'html2canvas', 'jszip', 'fonteditor-core', 'opentype.js', 'pako'],
+  external: ['pptxgenjs', 'jszip', 'fonteditor-core', 'pako'],
   onwarn,
 };
 
