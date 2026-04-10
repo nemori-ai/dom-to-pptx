@@ -237,21 +237,20 @@ async function processSlide(root, slide, pptx, globalOptions = {}) {
   const bgImage = rootStyle.backgroundImage;
   const bgColor = parseColor(rootStyle.backgroundColor);
 
-  // Check if background is a tiled/pattern gradient (e.g., grid lines with custom backgroundSize)
-  // Tiled gradients can't be represented as PPTX slide backgrounds, so use solid color instead.
+  // Check if background is a multi-gradient tiled pattern (e.g., grid lines with custom backgroundSize)
+  // that generateGradientSVG cannot handle. Single tiled gradients are now rendered as SVG <pattern>.
   const rootBgSize = rootStyle.backgroundSize || '';
-  const isRootTiledGradient =
-    bgImage &&
-    bgImage.includes('gradient') &&
-    rootBgSize !== '' &&
-    rootBgSize !== 'auto' &&
-    rootBgSize !== 'cover' &&
-    rootBgSize !== 'contain' &&
-    !rootBgSize.includes('100%');
+  const rootGradientCount = (bgImage ? bgImage.match(/linear-gradient|radial-gradient/g) || [] : []).length;
+  // Check if bgSize indicates actual tiling (any dimension < 100%). 'auto', '100%', 'cover' etc. are full-size.
+  const rootBgParts = rootBgSize.split(/\s+/);
+  const isFullDim = (v) => !v || v === 'auto' || v === '100%' || v === 'cover' || v === 'contain';
+  const isRootTiledSize = rootBgSize && !rootBgParts.every(isFullDim);
+  const isRootComplexTiledGradient =
+    bgImage && bgImage.includes('gradient') && isRootTiledSize && rootGradientCount > 1;
 
-  if (bgImage && bgImage !== 'none' && bgImage.includes('gradient') && !isRootTiledGradient) {
-    // Gradient background → convert to SVG image
-    const svgData = generateGradientSVG(rootRect.width, rootRect.height, bgImage, 0, null);
+  if (bgImage && bgImage !== 'none' && bgImage.includes('gradient') && !isRootComplexTiledGradient) {
+    // Gradient background → convert to SVG image (with pattern tiling if bgSize is set)
+    const svgData = generateGradientSVG(rootRect.width, rootRect.height, bgImage, 0, null, 0, rootBgSize || undefined);
     if (svgData) {
       slide.background = { data: svgData };
     }

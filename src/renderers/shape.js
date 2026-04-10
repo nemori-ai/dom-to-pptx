@@ -621,7 +621,9 @@ export class ShapeRenderer extends ElementRenderer {
           heightPx,
           style.backgroundImage,
           gradRadius,
-          null
+          null,
+          0,
+          style.backgroundSize
         );
       }
 

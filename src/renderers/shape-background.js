@@ -5,6 +5,18 @@
 import { getClipInfo } from '../utils/index.js';
 
 /**
+ * Check if a background-size value indicates tiling (smaller than container in either dimension).
+ * Values like 'auto', 'cover', 'contain', '100%', '100% 100%', '100% auto', 'auto 100%'
+ * all resolve to the full container size and are NOT tiled.
+ */
+function isTiledBgSize(bgSize) {
+  if (!bgSize) return false;
+  const parts = bgSize.split(/\s+/);
+  const isFullDim = (v) => !v || v === 'auto' || v === '100%' || v === 'cover' || v === 'contain';
+  return !parts.every(isFullDim);
+}
+
+/**
  * Check if any children have complex visual features that require
  * canvas capture when the parent has clipping or partial border radius.
  *
@@ -16,12 +28,10 @@ export function checkComplexChildren(node) {
     const cs = window.getComputedStyle(child);
     const childBgImage = cs.backgroundImage || '';
     const childBgSize = cs.backgroundSize || '';
-    const childHasTiled =
-      childBgImage.includes('gradient') &&
-      childBgSize !== '' &&
-      childBgSize !== 'auto' &&
-      childBgSize !== 'cover' &&
-      childBgSize !== 'contain';
+    const childGradCount = (childBgImage.match(/linear-gradient|radial-gradient/g) || []).length;
+    // Single tiled gradients are handled as SVG <pattern>, so only flag
+    // multi-gradient tiled backgrounds for canvas capture.
+    const childHasTiled = childBgImage.includes('gradient') && isTiledBgSize(childBgSize) && childGradCount > 1;
     // Note: mix-blend-mode is intentionally excluded from triggering canvas
     // capture. PPTX has no native blend mode support, so capturing via canvas
     // only loses fidelity (especially when children contain cross-origin images
@@ -55,15 +65,11 @@ export function checkNeedsCanvasCapture({
   const hasMultipleGradients = gradientCount > 1;
   const hasRepeatingGradient = bgImageStr.includes('repeating-');
 
-  // Detect tiled/pattern backgrounds (background-size creates repeating patterns)
-  const bgSize = style.backgroundSize || '';
+  // Detect tiled/pattern backgrounds (background-size creates repeating patterns).
+  // Single tiled gradients are now handled as SVG <pattern> by generateGradientSVG,
+  // so only trigger canvas capture for multi-gradient or repeating-gradient cases.
   const hasTiledBackground =
-    bgImageStr.includes('gradient') &&
-    bgSize !== '' &&
-    bgSize !== 'auto' &&
-    bgSize !== 'cover' &&
-    bgSize !== 'contain' &&
-    !bgSize.includes('100%');
+    bgImageStr.includes('gradient') && isTiledBgSize(style.backgroundSize) && gradientCount > 1;
 
   // Only capture parent with children when parent has clipping/overflow behavior
   // Skip root element (body) to avoid capturing entire slide as one image

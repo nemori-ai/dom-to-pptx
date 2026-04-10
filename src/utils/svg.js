@@ -226,7 +226,7 @@ function generateConicGradientPNG(w, h, content, radius) {
   return canvas.toDataURL('image/png');
 }
 
-export function generateGradientSVG(w, h, bgString, radius, border, blurPx) {
+export function generateGradientSVG(w, h, bgString, radius, border, blurPx, bgSize) {
   try {
     const conicMatch = bgString.match(/conic-gradient\((.*)\)/);
     if (conicMatch) {
@@ -378,12 +378,38 @@ export function generateGradientSVG(w, h, bgString, radius, border, blurPx) {
       shapeTag = `<rect x="0" y="0" width="${w}" height="${h}" rx="${radius}" ry="${radius}" fill="url(#grad)" ${strokeAttr} />`;
     }
 
+    // When bgSize is specified (e.g. "100% 4px"), wrap gradient in a <pattern> for tiling
+    let patternDefs = '';
+    let fillRef = 'url(#grad)';
+    if (bgSize && bgSize !== 'auto' && bgSize !== 'cover' && bgSize !== 'contain') {
+      const sizeParts = bgSize.split(/\s+/);
+      let patW = w, patH = h;
+      if (sizeParts[0] && sizeParts[0] !== 'auto') {
+        patW = sizeParts[0].includes('%') ? (parseFloat(sizeParts[0]) / 100) * w : parseFloat(sizeParts[0]);
+      }
+      if (sizeParts[1] && sizeParts[1] !== 'auto') {
+        patH = sizeParts[1].includes('%') ? (parseFloat(sizeParts[1]) / 100) * h : parseFloat(sizeParts[1]);
+      }
+      if (patW < w || patH < h) {
+        patternDefs = `<pattern id="pat" width="${patW}" height="${patH}" patternUnits="userSpaceOnUse">
+              <rect width="${patW}" height="${patH}" fill="url(#grad)"/>
+            </pattern>`;
+        fillRef = 'url(#pat)';
+      }
+    }
+
+    // Replace fill reference in shape tag
+    if (fillRef !== 'url(#grad)') {
+      shapeTag = shapeTag.replace(/fill="url\(#grad\)"/g, `fill="${fillRef}"`);
+    }
+
     const svg = `
       <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
           <defs>
             <linearGradient id="grad" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}">
               ${stopsXML}
             </linearGradient>
+            ${patternDefs}
           </defs>
           ${shapeTag}
       </svg>`;
