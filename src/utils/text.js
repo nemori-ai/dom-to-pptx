@@ -356,14 +356,16 @@ function selectFontForText(fontFamilyStr, text, node = null) {
   let eaFont = null;
 
   for (const font of fonts) {
-    // For generic fonts, resolve separately for Latin and CJK
     if (isGenericFont(font)) {
       if (!latinFont) latinFont = resolveFontName(font, false);
       if (!eaFont) eaFont = resolveFontName(font, true);
-    } else if (isCJKFont(font)) {
-      if (!eaFont) eaFont = toOfficeCJKFont(font);
     } else {
+      // Use the user-specified font for both latin and EA slots.
+      // We don't try to guess whether a font is "CJK" by name — that's unreliable
+      // (misses fonts like ZCOOL KuaiLe, and wrongly replaces embedded fonts like
+      // Noto Sans SC). The user's explicit font choice should be respected.
       if (!latinFont) latinFont = font;
+      if (!eaFont) eaFont = font;
     }
     if (latinFont && eaFont) break;
   }

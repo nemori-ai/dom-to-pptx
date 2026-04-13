@@ -39,7 +39,7 @@ function parseFontJson(str) {
  * @param {string} content - Raw XML string
  * @returns {{ xml: string, modified: boolean }}
  */
-function processDualFontsInXml(content) {
+export function processDualFontsInXml(content) {
   // Quick check: skip files that don't contain dual-font JSON
   if (!content.includes('{"latin"') && !content.includes('{&quot;latin')) {
     return { xml: content, modified: false };

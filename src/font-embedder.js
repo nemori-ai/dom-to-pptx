@@ -1,5 +1,6 @@
 // src/font-embedder.js
 import { fontToEot } from './font-utils.js';
+import { processDualFontsInXml } from './dual-font-processor.js';
 
 /**
  * Extract font metadata from an EOT buffer for OOXML font embedding.
@@ -77,7 +78,31 @@ export class PPTXEmbedFonts {
     await this.updatePresentationXML();
     await this.updateRelsPresentationXML();
     this.updateFontFiles();
+    // Expand dual-font JSON typeface values BEFORE adding panose/pitchFamily/charset,
+    // so that updateSlidesFontRefs can match the real font names instead of JSON strings.
+    await this.expandDualFontJson();
     await this.updateSlidesFontRefs();
+  }
+
+  /**
+   * Pre-process slide XML to expand dual-font JSON typeface values
+   * (e.g. {"latin":"Bebas Neue","ea":"Microsoft YaHei"}) into proper
+   * <a:latin> and <a:ea> elements. Must run before updateSlidesFontRefs()
+   * so that font name matching works on real names, not JSON strings.
+   */
+  async expandDualFontJson() {
+    const slideFiles = Object.keys(this.zip.files).filter(
+      (f) => f.startsWith('ppt/slides/slide') && f.endsWith('.xml')
+    );
+    for (const path of slideFiles) {
+      const file = this.zip.file(path);
+      if (!file) continue;
+      const xmlStr = await file.async('string');
+      const result = processDualFontsInXml(xmlStr);
+      if (result.modified) {
+        this.zip.file(path, result.xml);
+      }
+    }
   }
 
   async generateBlob() {
