@@ -34,10 +34,10 @@ export class ListRenderer extends ElementRenderer {
       let bullet = { type: 'bullet' };
       const listStyleType = liStyle.listStyleType || 'disc';
 
-      if (node.tagName === 'OL' || listStyleType === 'decimal') {
-        bullet = { type: 'number' };
-      } else if (listStyleType === 'none') {
+      if (listStyleType === 'none') {
         bullet = false;
+      } else if (node.tagName === 'OL' || listStyleType === 'decimal') {
+        bullet = { type: 'number' };
       } else {
         let code = '2022'; // disc
         if (listStyleType === 'circle') code = '25CB';

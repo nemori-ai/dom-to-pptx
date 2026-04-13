@@ -76,7 +76,7 @@ export function generateCustomShapeSVG(w, h, color, opacity, radii) {
   return 'data:image/svg+xml;base64,' + utoa(svg);
 }
 
-function parseGradientStops(parts) {
+function parseGradientStops(parts, gradientLength) {
   const stops = [];
   parts.forEach((part, idx) => {
     let color = part;
@@ -84,14 +84,20 @@ function parseGradientStops(parts) {
     const posMatch = part.match(/^(.*?)\s+(-?[\d.]+)(%|px)?$/);
     if (posMatch) {
       color = posMatch[1];
-      offset = parseFloat(posMatch[2]) / 100;
+      const value = parseFloat(posMatch[2]);
+      const unit = posMatch[3];
+      if (unit === 'px' && gradientLength > 0) {
+        offset = value / gradientLength;
+      } else {
+        offset = value / 100;
+      }
     }
-    stops.push({ color: color.trim(), offset });
+    stops.push({ color: color.trim(), offset: Math.max(0, Math.min(1, offset)) });
   });
   return stops;
 }
 
-function generateRadialGradientSVG(w, h, content, radius, blurPx) {
+function generateRadialGradientSVG(w, h, content, radius, blurPx, renderScale) {
   const parts = content.split(/,(?![^()]*\))/).map((p) => p.trim());
   if (parts.length < 2) return null;
 
@@ -102,23 +108,25 @@ function generateRadialGradientSVG(w, h, content, radius, blurPx) {
   }
 
   const stopParts = parts.slice(stopsStartIndex);
-  const stops = parseGradientStops(stopParts);
+  const r = Math.max(w, h) / 2;
+  const stops = parseGradientStops(stopParts, r);
 
   const isCircle = radius >= Math.min(w, h) / 2 - 1 && Math.abs(w - h) < 2;
   const pad = blurPx ? blurPx * 3 : 0;
-  const fullW = w + pad * 2;
-  const fullH = h + pad * 2;
+  const scale = renderScale || 1;
+  const fullW = (w + pad * 2) * scale;
+  const fullH = (h + pad * 2) * scale;
 
   const canvas = document.createElement('canvas');
   canvas.width = fullW;
   canvas.height = fullH;
   const ctx = canvas.getContext('2d');
+  if (scale !== 1) ctx.scale(scale, scale);
 
   if (blurPx) ctx.filter = `blur(${blurPx}px)`;
 
-  const cx = fullW / 2,
-    cy = fullH / 2;
-  const r = Math.max(w, h) / 2;
+  const cx = (w + pad * 2) / 2,
+    cy = (h + pad * 2) / 2;
   const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
   stops.forEach((s) => grad.addColorStop(s.offset, s.color));
   ctx.fillStyle = grad;
@@ -235,7 +243,58 @@ export function generateGradientSVG(w, h, bgString, radius, border, blurPx, bgSi
 
     const radialMatch = bgString.match(/radial-gradient\((.*)\)/);
     if (radialMatch) {
-      return generateRadialGradientSVG(w, h, radialMatch[1], radius, blurPx);
+      // Check if bgSize requires tiling
+      let patW = w, patH = h;
+      let needsTiling = false;
+      if (bgSize && bgSize !== 'auto' && bgSize !== 'cover' && bgSize !== 'contain') {
+        const sizeParts = bgSize.split(/\s+/);
+        if (sizeParts[0] && sizeParts[0] !== 'auto') {
+          patW = sizeParts[0].includes('%') ? (parseFloat(sizeParts[0]) / 100) * w : parseFloat(sizeParts[0]);
+        }
+        if (sizeParts[1] && sizeParts[1] !== 'auto') {
+          patH = sizeParts[1].includes('%') ? (parseFloat(sizeParts[1]) / 100) * h : parseFloat(sizeParts[1]);
+        }
+        needsTiling = patW < w || patH < h;
+      }
+
+      if (!needsTiling) {
+        return generateRadialGradientSVG(w, h, radialMatch[1], radius, blurPx);
+      }
+
+      // Render one tile as PNG at 3x resolution for smooth anti-aliasing
+      const tilePng = generateRadialGradientSVG(patW, patH, radialMatch[1], 0, 0, 3);
+      const tileData = typeof tilePng === 'string' ? tilePng : (tilePng && tilePng.data);
+      if (!tileData) return null;
+
+      // Build shape tag with border radius support
+      let shapeTag;
+      if (typeof radius === 'object' && radius !== null) {
+        const { tl = 0, tr = 0, br = 0, bl = 0 } = radius;
+        shapeTag =
+          `<path d="M${tl},0 L${w - tr},0` +
+          (tr > 0 ? ` A${tr},${tr} 0 0 1 ${w},${tr}` : ` L${w},0`) +
+          ` L${w},${h - br}` +
+          (br > 0 ? ` A${br},${br} 0 0 1 ${w - br},${h}` : ` L${w},${h}`) +
+          ` L${bl},${h}` +
+          (bl > 0 ? ` A${bl},${bl} 0 0 1 0,${h - bl}` : ` L0,${h}`) +
+          ` L0,${tl}` +
+          (tl > 0 ? ` A${tl},${tl} 0 0 1 ${tl},0` : ` L0,0`) +
+          ` Z" fill="url(#pat)"/>`;
+      } else {
+        shapeTag = `<rect x="0" y="0" width="${w}" height="${h}" rx="${radius}" ry="${radius}" fill="url(#pat)"/>`;
+      }
+
+      const svg = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+          <defs>
+            <pattern id="pat" width="${patW}" height="${patH}" patternUnits="userSpaceOnUse">
+              <image href="${tileData}" width="${patW}" height="${patH}"/>
+            </pattern>
+          </defs>
+          ${shapeTag}
+        </svg>`;
+
+      return 'data:image/svg+xml;base64,' + utoa(svg);
     }
 
     const match = bgString.match(/linear-gradient\((.*)\)/);

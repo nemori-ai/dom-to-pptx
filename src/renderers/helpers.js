@@ -9,6 +9,98 @@ import { getBorderInfo, generateCompositeBorderSVG } from '../utils/border.js';
 import { LAYER } from '../utils/stacking.js';
 import { PX_TO_INCH, PX_TO_PT } from '../utils/constants.js';
 
+// ---------------------------------------------------------------------------
+// CSS Counter resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a counter-reset or counter-increment CSS property value into pairs.
+ * E.g. "steps 0 list-item 0" → [{ name: 'steps', value: 0 }, { name: 'list-item', value: 0 }]
+ * @param {string} prop - The computed CSS counter-reset or counter-increment value
+ * @param {number} defaultValue - Default value when not specified (0 for reset, 1 for increment)
+ * @returns {Array<{ name: string, value: number }>}
+ */
+function parseCounterProp(prop, defaultValue) {
+  if (!prop || prop === 'none') return [];
+  const result = [];
+  const parts = prop.trim().split(/\s+/);
+  let i = 0;
+  while (i < parts.length) {
+    const name = parts[i];
+    if (name === 'none') { i++; continue; }
+    const next = parts[i + 1];
+    if (next !== undefined && /^-?\d+$/.test(next)) {
+      result.push({ name, value: parseInt(next) });
+      i += 2;
+    } else {
+      result.push({ name, value: defaultValue });
+      i++;
+    }
+  }
+  return result;
+}
+
+/**
+ * Resolve a CSS counter value for a specific element by walking the DOM in
+ * document order (DFS), tracking counter-reset and counter-increment.
+ *
+ * @param {HTMLElement} targetElement - The element whose counter value we want
+ * @param {string} counterName - Name of the counter (e.g. 'steps')
+ * @returns {number} The resolved counter value
+ */
+function resolveCounterValue(targetElement, counterName) {
+  let value = 0;
+  let found = false;
+
+  function walk(el) {
+    if (found) return;
+
+    const style = window.getComputedStyle(el);
+
+    // counter-reset
+    for (const { name, value: resetVal } of parseCounterProp(style.counterReset, 0)) {
+      if (name === counterName) value = resetVal;
+    }
+
+    // counter-increment (applied after reset on the same element)
+    for (const { name, value: incVal } of parseCounterProp(style.counterIncrement, 1)) {
+      if (name === counterName) value += incVal;
+    }
+
+    if (el === targetElement) { found = true; return; }
+
+    for (const child of el.children) {
+      if (found) return;
+      walk(child);
+    }
+  }
+
+  walk(targetElement.ownerDocument.documentElement);
+  return value;
+}
+
+/**
+ * Resolve counter() functions in a CSS content value.
+ * E.g. 'counter(steps)' → '"1"', '"Step " counter(steps)' → '"Step " "1"'
+ *
+ * @param {string} contentValue - The raw CSS content property value from getComputedStyle
+ * @param {HTMLElement} element - The element the pseudo-element belongs to
+ * @returns {string} The content value with counter() functions replaced
+ */
+function resolveContentCounters(contentValue, element) {
+  if (!contentValue || !contentValue.includes('counter(')) return contentValue;
+
+  return contentValue.replace(
+    /counter\(\s*([\w-]+)(?:\s*,\s*[\w-]+)?\s*\)/g,
+    (_, counterName) => {
+      const val = resolveCounterValue(element, counterName);
+      return `"${val}"`;
+    }
+  );
+}
+
+// ---------------------------------------------------------------------------
+
 let concurrencyLimit = 10;
 let activeCount = 0;
 const waitQueue = [];
@@ -325,6 +417,15 @@ export function isComplexHierarchy(root) {
         parseFloat(s.borderBottomWidth) > 0;
       const hasRadius = parseFloat(s.borderRadius) > 0;
       if (hasBg || hasBorder || hasRadius) return true;
+
+      // Positioned pseudo-elements (CSS counter styling, custom bullets, decorative lines)
+      // cannot be represented by flat list text — require ShapeRenderer path
+      for (const pseudo of ['::before', '::after']) {
+        const ps = window.getComputedStyle(el, pseudo);
+        if (!ps.content || ps.content === 'none' || ps.content === 'normal') continue;
+        if (ps.display === 'none') continue;
+        if (ps.position === 'absolute' || ps.position === 'relative') return true;
+      }
     }
 
     // 2. Media / Icons
@@ -371,7 +472,7 @@ export function collectListParts(node, parentStyle, scale, globalOptions = {}) {
   // Check for CSS Content (::before) - often used for icons
   if (node.nodeType === 1) {
     const beforeStyle = window.getComputedStyle(node, '::before');
-    const content = beforeStyle.content;
+    const content = resolveContentCounters(beforeStyle.content, node);
     if (content && content !== 'none' && content !== 'normal' && content !== '""') {
       // Strip quotes
       const cleanContent = content.replace(/^['"]|['"]$/g, '');
@@ -514,7 +615,7 @@ export function collectPseudoElementItems(
 
     const position = ps.position;
     const isPositioned = position === 'absolute' || position === 'relative';
-    const rawContent = ps.content;
+    const rawContent = resolveContentCounters(ps.content, node);
     const isInlineDecor =
       !isPositioned &&
       (ps.display === 'inline-block' || ps.display === 'block' || ps.display === 'flex') &&
@@ -876,49 +977,108 @@ export function collectPseudoElementItems(
         let textAlign = ps.textAlign || 'center';
         if (textAlign === 'start') textAlign = 'left';
 
-        const textOpts = {
-          x: pX,
-          y: pY,
-          w: pW > 0 ? pW : estTextW,
-          h: pH > 0 ? pH : estTextH,
-          align: textAlign,
-          valign: 'middle',
-          // PptxGenJS margin expects points (valToPts multiplies by 12700 EMU/pt)
-          margin: [
-            padT * PX_TO_PT * config.scale,
-            padR * PX_TO_PT * config.scale,
-            padB * PX_TO_PT * config.scale,
-            padL * PX_TO_PT * config.scale,
-          ],
-          wrap: false,
-          autoFit: false,
-        };
-
-        if (hasBg && bgColor.hex) {
-          const transparency = (1 - bgColor.opacity) * 100;
-          textOpts.fill = { color: bgColor.hex, transparency };
-        }
-
-        const borderInfo = getBorderInfo(ps, config.scale);
-        if (borderInfo.type === 'uniform') {
-          textOpts.line = borderInfo.options;
+        // Detect flex centering (common in counter-styled pseudo-elements)
+        if (ps.display === 'flex' || ps.display === 'inline-flex') {
+          const jc = ps.justifyContent;
+          if (jc === 'center' || jc === 'space-around' || jc === 'space-evenly') {
+            textAlign = 'center';
+          } else if (jc === 'flex-end' || jc === 'end') {
+            textAlign = 'right';
+          }
         }
 
         const brStr = ps.borderRadius || '';
         const brPx = brStr.includes('%')
           ? (parseFloat(brStr) / 100) * Math.min(pseudoW, pseudoH)
           : parseFloat(brStr) || 0;
-        if (brPx > 0) {
-          textOpts.rectRadius = brPx * PX_TO_INCH * config.scale;
-        }
 
-        items.push({
-          type: 'text',
-          layer: LAYER.CONTENT,
-          domOrder: domOrder + 0.1,
-          textParts: [{ text, options: textStyle }],
-          options: textOpts,
-        });
+        const borderInfo = getBorderInfo(ps, config.scale);
+
+        // Circle detection: border-radius creates a circle when w ≈ h and radius ≥ half side
+        const isCircle =
+          (brStr === '50%' || brPx >= Math.min(pseudoW, pseudoH) / 2 - 0.5) &&
+          Math.abs(pseudoW - pseudoH) < 1;
+
+        if (isCircle) {
+          // Split into ellipse shape (bg + border) + transparent text overlay
+          const bgTransparency = bgColor.hex ? (1 - bgColor.opacity) * 100 : 0;
+          let lineOpt = { type: 'none' };
+          if (borderInfo.type === 'uniform') lineOpt = borderInfo.options;
+
+          items.push({
+            type: 'shape',
+            layer: LAYER.CONTENT,
+            domOrder: domOrder + 0.09,
+            shapeType: 'ellipse',
+            options: {
+              x: pX,
+              y: pY,
+              w: pW,
+              h: pH,
+              fill: bgColor.hex ? { color: bgColor.hex, transparency: bgTransparency } : { type: 'none' },
+              line: lineOpt,
+            },
+          });
+
+          items.push({
+            type: 'text',
+            layer: LAYER.CONTENT,
+            domOrder: domOrder + 0.1,
+            textParts: [{ text, options: textStyle }],
+            options: {
+              x: pX,
+              y: pY,
+              w: pW > 0 ? pW : estTextW,
+              h: pH > 0 ? pH : estTextH,
+              align: textAlign,
+              valign: 'middle',
+              margin: 0,
+              wrap: false,
+              autoFit: false,
+              fill: { type: 'none' },
+              line: { type: 'none' },
+            },
+          });
+        } else {
+          // Non-circle: unified text element with fill/border/rectRadius
+          const textOpts = {
+            x: pX,
+            y: pY,
+            w: pW > 0 ? pW : estTextW,
+            h: pH > 0 ? pH : estTextH,
+            align: textAlign,
+            valign: 'middle',
+            margin: [
+              padT * PX_TO_PT * config.scale,
+              padR * PX_TO_PT * config.scale,
+              padB * PX_TO_PT * config.scale,
+              padL * PX_TO_PT * config.scale,
+            ],
+            wrap: false,
+            autoFit: false,
+          };
+
+          if (hasBg && bgColor.hex) {
+            const transparency = (1 - bgColor.opacity) * 100;
+            textOpts.fill = { color: bgColor.hex, transparency };
+          }
+
+          if (borderInfo.type === 'uniform') {
+            textOpts.line = borderInfo.options;
+          }
+
+          if (brPx > 0) {
+            textOpts.rectRadius = brPx * PX_TO_INCH * config.scale;
+          }
+
+          items.push({
+            type: 'text',
+            layer: LAYER.CONTENT,
+            domOrder: domOrder + 0.1,
+            textParts: [{ text, options: textStyle }],
+            options: textOpts,
+          });
+        }
 
         if (borderInfo.type === 'composite') {
           const borderSvg = generateCompositeBorderSVG(pseudoW, pseudoH, brPx, borderInfo.sides);

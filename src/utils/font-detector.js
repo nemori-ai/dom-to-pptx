@@ -7,14 +7,24 @@
 export function getUsedFontFamilies(root) {
   const families = new Set();
 
+  function addPrimary(fontFamily) {
+    const primary = fontFamily.split(',')[0].trim().replace(/['"]/g, '');
+    if (primary) families.add(primary);
+  }
+
   function scan(node) {
     if (node.nodeType === 1) {
       // Element
       const style = window.getComputedStyle(node);
-      const fontList = style.fontFamily.split(',');
-      // The first font in the stack is the primary one
-      const primary = fontList[0].trim().replace(/['"]/g, '');
-      if (primary) families.add(primary);
+      addPrimary(style.fontFamily);
+
+      // Pseudo-elements may use different fonts (e.g. CSS counters with Orbitron)
+      for (const pseudo of ['::before', '::after']) {
+        const ps = window.getComputedStyle(node, pseudo);
+        if (ps.content && ps.content !== 'none' && ps.content !== 'normal') {
+          addPrimary(ps.fontFamily);
+        }
+      }
     }
     for (const child of node.childNodes) {
       scan(child);
@@ -83,28 +93,54 @@ async function resolveGoogleFontsFullTTF(usedFamilies) {
     return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
   };
 
+  // Helper: check if a TTF buffer has an 'fvar' table (= variable font)
+  const hasVarTable = (buf) => {
+    try {
+      const view = new DataView(buf);
+      const n = view.getUint16(4);
+      for (let i = 0; i < n; i++) {
+        const off = 12 + i * 16;
+        const tag =
+          String.fromCharCode(view.getUint8(off), view.getUint8(off + 1),
+            view.getUint8(off + 2), view.getUint8(off + 3));
+        if (tag === 'fvar') return true;
+      }
+    } catch { /* ignore */ }
+    return false;
+  };
+
   await Promise.all(
     [...gfFamilies].map(async (family) => {
       const dirName = family.toLowerCase().replace(/\s+/g, '');
       const baseName = family.replace(/\s+/g, '');
-      // Try static Regular first, then variable font pattern
-      const fileNames = [`${baseName}-Regular.ttf`, `${baseName}[wght].ttf`];
 
-      for (const fileName of fileNames) {
-        for (const licDir of LICENSE_DIRS) {
-          try {
-            const url = `${GITHUB_BASE}/${licDir}/${dirName}/${fileName}`;
-            const resp = await fetchWithTimeout(url);
-            if (!resp.ok) continue;
-            const buf = await resp.arrayBuffer();
+      // 1. Try static Regular TTF from GitHub first
+      for (const licDir of LICENSE_DIRS) {
+        try {
+          const url = `${GITHUB_BASE}/${licDir}/${dirName}/${baseName}-Regular.ttf`;
+          const resp = await fetchWithTimeout(url);
+          if (!resp.ok) continue;
+          const buf = await resp.arrayBuffer();
+          if (!hasVarTable(buf)) {
             result.set(family, { buffer: buf, type: 'ttf' });
             return;
-          } catch {
-            // Try next
           }
-        }
+        } catch { /* next */ }
       }
-      console.warn(`Could not find full TTF for "${family}" on GitHub`);
+
+      // 2. Variable TTF from GitHub (will be converted to static in fontToEot)
+      for (const licDir of LICENSE_DIRS) {
+        try {
+          const url = `${GITHUB_BASE}/${licDir}/${dirName}/${baseName}[wght].ttf`;
+          const resp = await fetchWithTimeout(url);
+          if (!resp.ok) continue;
+          const buf = await resp.arrayBuffer();
+          result.set(family, { buffer: buf, type: 'ttf' });
+          return;
+        } catch { /* next */ }
+      }
+
+      console.warn(`Could not find font for "${family}"`);
     })
   );
 
