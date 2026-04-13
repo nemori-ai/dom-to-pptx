@@ -1,6 +1,7 @@
 // src/font-utils.js
 import { Font, woff2 } from 'fonteditor-core';
 import pako from 'pako';
+import { instantiateVariable } from './hb-subset.js';
 
 let woff2InitPromise = null;
 
@@ -233,94 +234,6 @@ function isVariableFont(buf) {
 }
 
 /**
- * Strip variable-font-only tables from a TTF buffer, producing a valid static TTF.
- * Preserves all standard tables (GPOS, GSUB, GDEF, gasp, prep, etc.) intact.
- * Only removes: fvar, gvar, STAT, HVAR, MVAR, avar, CVAR.
- * @param {ArrayBuffer} buf - Raw variable TTF data
- * @returns {ArrayBuffer} Static TTF data
- */
-function stripVariableTables(buf) {
-  // Guard: only process simple TrueType fonts (not TTC collections or CFF-based OTF)
-  const sfVersion = new DataView(buf).getUint32(0);
-  if (sfVersion !== 0x00010000) return buf;
-
-  const VARIABLE_TAGS = new Set(['fvar', 'gvar', 'STAT', 'HVAR', 'MVAR', 'avar', 'CVAR']);
-  const src = new DataView(buf);
-  const srcBytes = new Uint8Array(buf);
-  const numTables = src.getUint16(4);
-
-  // Collect tables to keep
-  const keep = [];
-  for (let i = 0; i < numTables; i++) {
-    const off = 12 + i * 16;
-    const tag =
-      String.fromCharCode(src.getUint8(off)) +
-      String.fromCharCode(src.getUint8(off + 1)) +
-      String.fromCharCode(src.getUint8(off + 2)) +
-      String.fromCharCode(src.getUint8(off + 3));
-    if (!VARIABLE_TAGS.has(tag)) {
-      const checksum = src.getUint32(off + 4);
-      const offset = src.getUint32(off + 8);
-      const length = src.getUint32(off + 12);
-      keep.push({ tag, checksum, offset, length });
-    }
-  }
-
-  // Compute new TrueType header values
-  const n = keep.length;
-  let entrySelector = 0, searchRange = 1;
-  while (searchRange * 2 <= n) { searchRange *= 2; entrySelector++; }
-  searchRange *= 16;
-  const rangeShift = n * 16 - searchRange;
-
-  // Calculate total output size (4-byte aligned per table)
-  const headerSize = 12 + n * 16;
-  let totalSize = headerSize;
-  for (const t of keep) totalSize += (t.length + 3) & ~3;
-
-  const out = new ArrayBuffer(totalSize);
-  const outView = new DataView(out);
-  const outBytes = new Uint8Array(out);
-
-  // TrueType header
-  outView.setUint32(0, 0x00010000); // sfVersion
-  outView.setUint16(4, n);
-  outView.setUint16(6, searchRange);
-  outView.setUint16(8, entrySelector);
-  outView.setUint16(10, rangeShift);
-
-  // Write table directory entries and copy table data
-  let dataOffset = headerSize;
-  for (let i = 0; i < n; i++) {
-    const t = keep[i];
-    const dirOff = 12 + i * 16;
-    for (let j = 0; j < 4; j++) outView.setUint8(dirOff + j, t.tag.charCodeAt(j));
-    outView.setUint32(dirOff + 4, t.checksum);
-    outView.setUint32(dirOff + 8, dataOffset);
-    outView.setUint32(dirOff + 12, t.length);
-    outBytes.set(new Uint8Array(buf, t.offset, t.length), dataOffset);
-    dataOffset += (t.length + 3) & ~3;
-  }
-
-  // Recalculate head.checkSumAdjustment
-  for (let i = 0; i < n; i++) {
-    if (keep[i].tag === 'head') {
-      const headOff = outView.getUint32(12 + i * 16 + 8);
-      outView.setUint32(headOff + 8, 0); // zero out first
-      // totalSize is always 4-byte aligned, so we can read uint32 directly
-      let sum = 0;
-      for (let w = 0; w < totalSize / 4; w++) {
-        sum = (sum + outView.getUint32(w * 4)) >>> 0;
-      }
-      outView.setUint32(headOff + 8, (0xB1B0AFBA - sum) >>> 0);
-      break;
-    }
-  }
-
-  return out;
-}
-
-/**
  * Converts various font formats to EOT for PowerPoint .fntdata embedding.
  * Builds the EOT header manually to match PowerPoint's expected format.
  * @param {string} type - 'ttf', 'woff', 'woff2', or 'otf'
@@ -357,12 +270,13 @@ export async function fontToEot(type, fontBuffer, opts = {}) {
         : ttfOut.buffer.slice(ttfOut.byteOffset, ttfOut.byteOffset + ttfOut.byteLength);
   }
 
-  // Strip variable font tables (fvar/gvar/STAT/etc.) from TTF binary.
-  // These tables cause PowerPoint to reject the embedded font.
-  // We strip at the binary level to preserve all standard tables (GPOS, GSUB, etc.)
-  // that fonteditor-core's conversion would discard.
+  // Instance variable fonts to static using harfbuzz subset WASM.
+  // Pins wght axis to 400 (Regular) and removes all variation tables,
+  // producing a proper static TTF with correct glyph outlines and metrics.
   if (isVariableFont(actualBuffer)) {
-    actualBuffer = stripVariableTables(actualBuffer);
+    actualBuffer = await instantiateVariable(actualBuffer, {
+      hbSubsetWasmUrl: opts.hbSubsetWasmUrl,
+    });
   }
 
   // Ensure we have a proper ArrayBuffer

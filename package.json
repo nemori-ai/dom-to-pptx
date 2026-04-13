@@ -60,6 +60,7 @@
   "devDependencies": {
     "@rollup/plugin-commonjs": "^29.0.2",
     "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-replace": "^6.0.2",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "buffer": "^6.0.3",
     "eslint": "^9.39.4",
@@ -78,6 +79,7 @@
     "fonteditor-core": "^2.6.3",
     "jszip": "^3.10.1",
     "pako": "^2.1.0",
+    "harfbuzzjs": "^0.10.3",
     "pptxgenjs": "^3.12.0",
     "puppeteer": "^24.40.0"
   }

@@ -1,8 +1,18 @@
 // rollup.config.js
+import { readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import resolve from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import polyfillNode from 'rollup-plugin-polyfill-node';
 import json from '@rollup/plugin-json';
+import replace from '@rollup/plugin-replace';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Inline hb-subset.wasm as base64 data URI for the browser bundle
+const hbSubsetWasm = readFileSync(join(__dirname, 'node_modules/harfbuzzjs/hb-subset.wasm'));
+const hbSubsetBase64 = 'data:application/wasm;base64,' + hbSubsetWasm.toString('base64');
 
 const input = 'src/index.js';
 
@@ -87,6 +97,14 @@ const configBundle = {
 
     // 4. Inject Node.js Polyfills (Buffer, Stream, etc.)
     polyfillNode(),
+
+    // 5. Inline hb-subset.wasm as base64 data URI
+    replace({
+      preventAssignment: true,
+      values: {
+        '__HB_SUBSET_WASM_INLINE__': JSON.stringify(hbSubsetBase64),
+      },
+    }),
   ],
   // Empty external list means "Bundle everything"
   external: [],

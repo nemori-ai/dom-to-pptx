@@ -130,6 +130,7 @@ export async function exportToPptx(target, options = {}) {
       if (fontData) {
         await embedder.addFont(fontData.name, fontData.buffer, fontData.type, {
           woff2WasmUrl: opts.woff2WasmUrl,
+          hbSubsetWasmUrl: opts.hbSubsetWasmUrl,
         });
       }
     }
