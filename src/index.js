@@ -128,10 +128,14 @@ export async function exportToPptx(target, options = {}) {
     );
     for (const fontData of fontDataArr) {
       if (fontData) {
-        await embedder.addFont(fontData.name, fontData.buffer, fontData.type, {
-          woff2WasmUrl: opts.woff2WasmUrl,
-          hbSubsetWasmUrl: opts.hbSubsetWasmUrl,
-        });
+        try {
+          await embedder.addFont(fontData.name, fontData.buffer, fontData.type, {
+            woff2WasmUrl: opts.woff2WasmUrl,
+            hbSubsetWasmUrl: opts.hbSubsetWasmUrl,
+          });
+        } catch (e) {
+          console.warn(`Skipping font "${fontData.name}": ${e.message}`);
+        }
       }
     }
 

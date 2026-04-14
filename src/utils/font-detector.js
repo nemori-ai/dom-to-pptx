@@ -177,6 +177,13 @@ export async function getAutoDetectedFonts(usedFamilies) {
     return chosenUrl;
   };
 
+  // Skip library-internal fonts that are not useful in PPTX output.
+  // Math renderers (MathJax, KaTeX) inject @font-face rules for their engines.
+  // These get rasterized as images during conversion, so embedding the font files
+  // is unnecessary — and some (e.g. MJXZERO) are CFF-outline WOFFs that
+  // fonteditor-core cannot convert.
+  const isLibraryInternalFont = (name) => /^MJX|^MathJax[_-]|^KaTeX[_-]/i.test(name);
+
   const processedFamilies = new Set();
 
   for (const sheet of Array.from(document.styleSheets)) {
@@ -192,7 +199,7 @@ export async function getAutoDetectedFonts(usedFamilies) {
 
           // Only embed one file per font family (Google Fonts returns multiple
           // unicode-range subsets — we need the full font, not subsets).
-          if (usedFamilies.has(familyName) && !processedFamilies.has(familyName)) {
+          if (usedFamilies.has(familyName) && !processedFamilies.has(familyName) && !isLibraryInternalFont(familyName)) {
             const src = rule.style.getPropertyValue('src');
             const url = extractUrl(src);
 
