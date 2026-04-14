@@ -8,7 +8,7 @@ import {
   getEffectiveBackground,
 } from './color.js';
 import { PX_TO_PT, FONT_SIZE_FACTOR } from './constants.js';
-import { detectFontsForPPTX } from './detect-fonts.js';
+import detectFontsForPPTX from './detect-fonts.js';
 
 // CJK font indicators in font names (lowercase for matching)
 const CJK_FONT_INDICATORS = [
