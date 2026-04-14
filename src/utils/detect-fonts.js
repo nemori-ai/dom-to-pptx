@@ -355,22 +355,30 @@ function measureSingleFont(ctx, baseStyle, fontName, sample) {
 }
 
 /**
- * Dual-fallback glyph coverage check.
- * Measures candidate font with two different fallbacks (monospace and serif).
- * If the font has the target glyphs, both produce identical metrics.
- * If it lacks them, the browser falls back differently, producing divergent metrics.
+ * Single-sentinel glyph coverage check.
+ * Compares "candidate, monospace" vs bare "monospace" measurements.
+ * - If the candidate has the target glyphs, it renders them itself,
+ *   producing metrics that differ from bare monospace.
+ * - If the candidate lacks them, the browser falls back through the
+ *   identical chain: candidate(miss) → monospace → system CJK fallback,
+ *   which equals bare monospace → system CJK fallback. Metrics match.
+ *
+ * Why not dual-fallback (monospace vs serif paths)?
+ * Chrome's per-glyph CJK fallback can converge both paths to the same
+ * system font (e.g. PingFang SC on macOS), defeating the dual approach.
+ * The single-sentinel method doesn't rely on path divergence.
  */
 function fontHasGlyphForSample(ctx, baseStyle, fontName, sample) {
   const family = quoteFontFamily(fontName);
 
   ctx.font = `${baseStyle} ${family}, monospace`;
-  const withMono = readTextMetrics(ctx.measureText(sample));
+  const withCandidate = readTextMetrics(ctx.measureText(sample));
 
-  ctx.font = `${baseStyle} ${family}, serif`;
-  const withSerif = readTextMetrics(ctx.measureText(sample));
+  ctx.font = `${baseStyle} monospace`;
+  const bareMono = readTextMetrics(ctx.measureText(sample));
 
-  const dist = calcMetricScore(withMono, withSerif);
-  return dist < 0.01;
+  // If candidate changed the rendering (metrics diverge), it has the glyphs.
+  return calcMetricScore(withCandidate, bareMono) >= 0.01;
 }
 
 function quoteFontFamily(name) {
