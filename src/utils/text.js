@@ -8,6 +8,7 @@ import {
   getEffectiveBackground,
 } from './color.js';
 import { PX_TO_PT, FONT_SIZE_FACTOR } from './constants.js';
+import { detectFontsForPPTX } from './detect-fonts.js';
 
 // CJK font indicators in font names (lowercase for matching)
 const CJK_FONT_INDICATORS = [
@@ -519,8 +520,28 @@ export function getTextStyle(style, scale, text = '', node = null, options = {})
     charSpacing = charSpacing ? charSpacing + adjustment : adjustment;
   }
 
-  // Select appropriate font based on text content (CJK detection)
-  const fontFace = selectFontForText(style.fontFamily, text, node);
+  // Select appropriate font(s) for each OOXML script category.
+  // Uses Canvas measureText to detect actual rendering fonts when a DOM node is available.
+  // Falls back to heuristic-based selectFontForText when no node (theoretical safety net).
+  let fontFace;
+  if (node) {
+    const detected = detectFontsForPPTX(node, text);
+    const allSame = detected.latin === detected.ea
+      && detected.latin === detected.cs
+      && detected.latin === detected.symbol;
+    if (allSame) {
+      fontFace = detected.latin;
+    } else {
+      fontFace = JSON.stringify({
+        latin: detected.latin,
+        ea: detected.ea,
+        cs: detected.cs,
+        sym: detected.symbol,
+      });
+    }
+  } else {
+    fontFace = selectFontForText(style.fontFamily, text, node);
+  }
 
   // --- Strikethrough ---
   // CSS text-decoration can include: underline, line-through, overline

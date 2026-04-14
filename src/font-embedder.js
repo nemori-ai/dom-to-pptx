@@ -1,6 +1,6 @@
 // src/font-embedder.js
 import { fontToEot } from './font-utils.js';
-import { processDualFontsInXml } from './dual-font-processor.js';
+import { expandFontSlotsInXml } from './font-slot-processor.js';
 
 /**
  * Extract font metadata from an EOT buffer for OOXML font embedding.
@@ -78,19 +78,20 @@ export class PPTXEmbedFonts {
     await this.updatePresentationXML();
     await this.updateRelsPresentationXML();
     this.updateFontFiles();
-    // Expand dual-font JSON typeface values BEFORE adding panose/pitchFamily/charset,
+    // Expand font slot JSON typeface values BEFORE adding panose/pitchFamily/charset,
     // so that updateSlidesFontRefs can match the real font names instead of JSON strings.
-    await this.expandDualFontJson();
+    await this.expandFontSlotJson();
     await this.updateSlidesFontRefs();
   }
 
   /**
-   * Pre-process slide XML to expand dual-font JSON typeface values
-   * (e.g. {"latin":"Bebas Neue","ea":"Microsoft YaHei"}) into proper
-   * <a:latin> and <a:ea> elements. Must run before updateSlidesFontRefs()
-   * so that font name matching works on real names, not JSON strings.
+   * Pre-process slide XML to expand font slot JSON typeface values
+   * (e.g. {"latin":"Arial","ea":"Microsoft YaHei","cs":"Arial","sym":"Cambria Math"})
+   * into proper <a:latin>, <a:ea>, <a:cs>, <a:sym> elements.
+   * Must run before updateSlidesFontRefs() so that font name matching works
+   * on real names, not JSON strings.
    */
-  async expandDualFontJson() {
+  async expandFontSlotJson() {
     const slideFiles = Object.keys(this.zip.files).filter(
       (f) => f.startsWith('ppt/slides/slide') && f.endsWith('.xml')
     );
@@ -98,7 +99,7 @@ export class PPTXEmbedFonts {
       const file = this.zip.file(path);
       if (!file) continue;
       const xmlStr = await file.async('string');
-      const result = processDualFontsInXml(xmlStr);
+      const result = expandFontSlotsInXml(xmlStr);
       if (result.modified) {
         this.zip.file(path, result.xml);
       }
@@ -235,7 +236,7 @@ export class PPTXEmbedFonts {
    * (a:latin, a:ea, a:cs) that match embedded font names.
    * PowerPoint requires these attributes on text run font refs to use embedded fonts.
    *
-   * Note: postProcessDualFonts() runs after generateBlob() and strips pitchFamily/charset
+   * Note: postProcessFontSlots() runs after generateBlob() and strips pitchFamily/charset
    * from non-embedded fonts. Embedded fonts survive because: (1) embeddedFontNames opt-out
    * prevents stripping, and (2) the panose attribute we add here makes the stripping regex
    * not match (it expects pitchFamily immediately after typeface, but panose is in between).
@@ -260,11 +261,11 @@ export class PPTXEmbedFonts {
       let modified = false;
 
       for (const [fontName, meta] of Object.entries(metaMap)) {
-        // Match <a:latin typeface="FontName" .../> or <a:ea typeface="FontName" .../>
-        // that don't already have panose attribute. Allow other attrs between typeface and />
+        // Match <a:latin|ea|cs|sym typeface="FontName" .../> that don't already have
+        // panose attribute. Allow other attrs between typeface and />
         const escaped = fontName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const re = new RegExp(
-          `(<a:(?:latin|ea|cs)\\s+typeface="${escaped}")([^>]*?)(/?>)`,
+          `(<a:(?:latin|ea|cs|sym)\\s+typeface="${escaped}")([^>]*?)(/?>)`,
           'g'
         );
         xmlStr = xmlStr.replace(re, (match, prefix, middle, suffix) => {

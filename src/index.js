@@ -2,7 +2,7 @@
 import * as PptxGenJSImport from 'pptxgenjs';
 import { PPTXEmbedFonts } from './font-embedder.js';
 import JSZip from 'jszip';
-import { postProcessDualFonts } from './dual-font-processor.js';
+import { postProcessFontSlots } from './font-slot-processor.js';
 
 // Normalize import
 const PptxGenJS = PptxGenJSImport?.default ?? PptxGenJSImport;
@@ -142,9 +142,9 @@ export async function exportToPptx(target, options = {}) {
     finalBlob = await pptx.write({ outputType: 'blob' });
   }
 
-  // 5. Post-process: Handle dual-font (Latin + EA) fontFace JSON strings
+  // 5. Post-process: Expand font slot JSON into proper OOXML elements
   const embeddedFontNames = fontsToEmbed.map((f) => f.name);
-  finalBlob = await postProcessDualFonts(finalBlob, { embeddedFontNames });
+  finalBlob = await postProcessFontSlots(finalBlob, { embeddedFontNames });
 
   // 4. Output Handling
   // If skipDownload is NOT true, proceed with browser download
