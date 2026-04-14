@@ -71,7 +71,7 @@ export function expandFontSlotsInXml(content) {
 
   // Pattern 1: <a:latin typeface="{...}" .../> — replace with latin font only
   result = result.replace(
-    /<a:latin\s+typeface="(\{[^"]+\})"([^/]*)\s*\/>/g,
+    /<a:latin\s+typeface="(\{[^}]+\})"([^/]*)\s*\/>/g,
     (match, jsonStr, extraAttrs) => {
       const config = parseFontJson(jsonStr);
       if (config) {
@@ -84,7 +84,7 @@ export function expandFontSlotsInXml(content) {
 
   // Pattern 1b: <a:ea typeface="{...}" .../> — replace with ea font
   result = result.replace(
-    /<a:ea\s+typeface="(\{[^"]+\})"([^/]*)\s*\/>/g,
+    /<a:ea\s+typeface="(\{[^}]+\})"([^/]*)\s*\/>/g,
     (match, jsonStr, extraAttrs) => {
       const config = parseFontJson(jsonStr);
       if (config) {
@@ -97,7 +97,7 @@ export function expandFontSlotsInXml(content) {
 
   // Pattern 1c: <a:cs typeface="{...}" .../> — replace with cs font
   result = result.replace(
-    /<a:cs\s+typeface="(\{[^"]+\})"([^/]*)\s*\/>/g,
+    /<a:cs\s+typeface="(\{[^}]+\})"([^/]*)\s*\/>/g,
     (match, jsonStr, extraAttrs) => {
       const config = parseFontJson(jsonStr);
       if (config) {
@@ -110,7 +110,7 @@ export function expandFontSlotsInXml(content) {
 
   // Pattern 2: <a:rPr ... typeface="{...}" .../> (self-closing) → expand with children
   result = result.replace(
-    /<a:rPr([^>]*)\s+typeface=["'](\{[^"']+\})["']([^>]*)\s*\/>/g,
+    /<a:rPr([^>]*)\s+typeface=["'](\{[^}]+\})["']([^>]*)\s*\/>/g,
     (match, before, jsonStr, after) => {
       const config = parseFontJson(jsonStr);
       if (config) {
@@ -127,7 +127,7 @@ export function expandFontSlotsInXml(content) {
   // we only strip the residual typeface attr from the opening tag to avoid
   // injecting duplicate font slot elements.
   result = result.replace(
-    /<a:rPr([^>]*)\s+typeface=["'](\{[^"']+\})["']([^>]*)>/g,
+    /<a:rPr([^>]*)\s+typeface=["'](\{[^}]+\})["']([^>]*)>/g,
     (match, before, jsonStr, after) => {
       const config = parseFontJson(jsonStr);
       if (config) {
@@ -140,7 +140,7 @@ export function expandFontSlotsInXml(content) {
 
   // Pattern 4: typeface="{...}" anywhere (generic fallback) — use latin font
   result = result.replace(
-    /typeface=["'](\{[^"']+\})["']/g,
+    /typeface=["'](\{[^}]+\})["']/g,
     (match, jsonStr) => {
       const config = parseFontJson(jsonStr);
       if (config) {
