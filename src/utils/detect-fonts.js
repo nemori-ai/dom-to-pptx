@@ -186,10 +186,13 @@ function resolveScriptFont({
   }
 
   // Stage 3: Office fallback pool (incremental)
+  // Use <= (not <) so that Office fallback wins on tied scores. When all candidates
+  // get +1000 penalty (glyph check failed — e.g. headless container without target fonts),
+  // strict < would keep the stage 1/2 winner (e.g. "Roboto") over the Office pool.
   const knownSet = new Set(ancestorFonts.map((f) => f.toLowerCase()));
   const officeOnly = officeFonts.filter((f) => !knownSet.has(f.toLowerCase()));
   const stage3Incremental = detectBestMatch(ctx, baseStyle, sample, actual, officeOnly, glyphCheck);
-  const stage3 = stage3Incremental.score < stage2.score ? stage3Incremental : stage2;
+  const stage3 = stage3Incremental.score <= stage2.score ? stage3Incremental : stage2;
 
   return {
     font: normalizeResult(stage3.font || officeFonts[0]),
