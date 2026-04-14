@@ -2,6 +2,7 @@
 // Canvas-based font detection for PPTX output.
 // Detects the best-matching font for each OOXML script category
 // (latin, ea, cs, symbol) by measuring text rendering similarity.
+// Uses dual-fallback glyph coverage check to reject fonts lacking target script glyphs.
 //
 // Ported from detectFontsForPPTX.js (UMD) to ES module.
 
@@ -16,6 +17,8 @@
  *
  * Uses Canvas measureText to find the closest-matching font from a
  * 3-tier candidate pool: current element → ancestors → Office fallback.
+ * For ea/cs/symbol, applies dual-fallback glyph coverage check to reject
+ * candidates that don't actually contain the target script's glyphs.
  *
  * @param {HTMLElement} element - DOM element to detect fonts for
  * @param {string|null} [customText=null] - Optional text override; defaults to element.textContent
@@ -106,6 +109,7 @@ export function detectFontsForPPTX(element, customText = null, options = {}) {
     officeFonts: OFFICE_EA_FONTS, currentThreshold: config.currentThreshold,
     ancestorThreshold: config.ancestorThreshold,
     normalizeResult: (name) => normalizeToPPTEAFont(name, OFFICE_EA_FONTS, config.preferOfficeFonts),
+    checkGlyphCoverage: true,
   });
 
   const csResult = resolveScriptFont({
@@ -114,6 +118,7 @@ export function detectFontsForPPTX(element, customText = null, options = {}) {
     officeFonts: OFFICE_CS_FONTS, currentThreshold: config.currentThreshold,
     ancestorThreshold: config.ancestorThreshold,
     normalizeResult: (name) => normalizeToPPTCSFont(name, OFFICE_CS_FONTS, config.preferOfficeFonts),
+    checkGlyphCoverage: true,
   });
 
   let symbolResult;
@@ -124,6 +129,7 @@ export function detectFontsForPPTX(element, customText = null, options = {}) {
       officeFonts: OFFICE_SYMBOL_FONTS, currentThreshold: config.currentThreshold,
       ancestorThreshold: config.ancestorThreshold,
       normalizeResult: (name) => normalizeToPPTSymbolFont(name, OFFICE_SYMBOL_FONTS, config.preferOfficeFonts),
+      checkGlyphCoverage: true,
     });
   } else {
     symbolResult = {
@@ -158,19 +164,21 @@ export function detectFontsForPPTX(element, customText = null, options = {}) {
 function resolveScriptFont({
   ctx, baseStyle, fullFontFamily, sample, currentFonts, ancestorFonts,
   officeFonts, currentThreshold, ancestorThreshold, normalizeResult,
+  checkGlyphCoverage,
 }) {
   const actual = measureWithStack(ctx, baseStyle, fullFontFamily, sample);
+  const glyphCheck = checkGlyphCoverage;
   const currentSet = new Set(currentFonts.map((f) => f.toLowerCase()));
 
   // Stage 1: current element font stack
-  const stage1 = detectBestMatch(ctx, baseStyle, sample, actual, currentFonts);
+  const stage1 = detectBestMatch(ctx, baseStyle, sample, actual, currentFonts, glyphCheck);
   if (stage1.font && stage1.score <= currentThreshold) {
     return { font: normalizeResult(stage1.font), rawFont: stage1.font, score: stage1.score, stage: "current", candidates: currentFonts.slice() };
   }
 
   // Stage 2: ancestor fonts (incremental)
   const ancestorOnly = ancestorFonts.filter((f) => !currentSet.has(f.toLowerCase()));
-  const stage2Incremental = detectBestMatch(ctx, baseStyle, sample, actual, ancestorOnly);
+  const stage2Incremental = detectBestMatch(ctx, baseStyle, sample, actual, ancestorOnly, glyphCheck);
   const stage2 = stage2Incremental.score < stage1.score ? stage2Incremental : stage1;
 
   if (stage2.font && stage2.score <= ancestorThreshold) {
@@ -180,7 +188,7 @@ function resolveScriptFont({
   // Stage 3: Office fallback pool (incremental)
   const knownSet = new Set(ancestorFonts.map((f) => f.toLowerCase()));
   const officeOnly = officeFonts.filter((f) => !knownSet.has(f.toLowerCase()));
-  const stage3Incremental = detectBestMatch(ctx, baseStyle, sample, actual, officeOnly);
+  const stage3Incremental = detectBestMatch(ctx, baseStyle, sample, actual, officeOnly, glyphCheck);
   const stage3 = stage3Incremental.score < stage2.score ? stage3Incremental : stage2;
 
   return {
@@ -191,7 +199,7 @@ function resolveScriptFont({
   };
 }
 
-function detectBestMatch(ctx, baseStyle, sample, actual, fonts) {
+function detectBestMatch(ctx, baseStyle, sample, actual, fonts, glyphCheck) {
   const candidates = fonts.filter(Boolean);
   if (!candidates.length) return { font: "", score: Number.POSITIVE_INFINITY };
 
@@ -200,7 +208,19 @@ function detectBestMatch(ctx, baseStyle, sample, actual, fonts) {
 
   for (const fontName of candidates) {
     const test = measureSingleFont(ctx, baseStyle, fontName, sample);
-    const score = calcMetricScore(test, actual);
+    let score = calcMetricScore(test, actual);
+
+    // Dual-fallback glyph coverage check:
+    // Measures the candidate with two different fallbacks (monospace and serif).
+    // If the font has the target glyphs, both measurements match (font renders its own glyphs).
+    // If it lacks them, the browser falls back differently for each, producing divergent metrics.
+    // A +1000 penalty ensures fonts without target glyphs never win.
+    if (glyphCheck) {
+      if (!fontHasGlyphForSample(ctx, baseStyle, fontName, sample)) {
+        score += 1000;
+      }
+    }
+
     if (score < bestScore) { bestScore = score; bestFont = fontName; }
     if (score <= 0.0001) break;
   }
@@ -332,6 +352,25 @@ function measureSingleFont(ctx, baseStyle, fontName, sample) {
   const family = quoteFontFamily(fontName);
   ctx.font = `${baseStyle} ${family}, monospace`;
   return readTextMetrics(ctx.measureText(sample));
+}
+
+/**
+ * Dual-fallback glyph coverage check.
+ * Measures candidate font with two different fallbacks (monospace and serif).
+ * If the font has the target glyphs, both produce identical metrics.
+ * If it lacks them, the browser falls back differently, producing divergent metrics.
+ */
+function fontHasGlyphForSample(ctx, baseStyle, fontName, sample) {
+  const family = quoteFontFamily(fontName);
+
+  ctx.font = `${baseStyle} ${family}, monospace`;
+  const withMono = readTextMetrics(ctx.measureText(sample));
+
+  ctx.font = `${baseStyle} ${family}, serif`;
+  const withSerif = readTextMetrics(ctx.measureText(sample));
+
+  const dist = calcMetricScore(withMono, withSerif);
+  return dist < 0.01;
 }
 
 function quoteFontFamily(name) {
