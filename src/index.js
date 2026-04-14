@@ -136,14 +136,16 @@ export async function exportToPptx(target, options = {}) {
     }
 
     await embedder.updateFiles();
+    // Get actual embedded font names (after pruning unreferenced fonts)
+    var embeddedFontNames = embedder.getEmbeddedFontNames();
     finalBlob = await embedder.generateBlob();
   } else {
     // No fonts to embed
+    var embeddedFontNames = [];
     finalBlob = await pptx.write({ outputType: 'blob' });
   }
 
   // 5. Post-process: Expand font slot JSON into proper OOXML elements
-  const embeddedFontNames = fontsToEmbed.map((f) => f.name);
   finalBlob = await postProcessFontSlots(finalBlob, { embeddedFontNames });
 
   // 4. Output Handling

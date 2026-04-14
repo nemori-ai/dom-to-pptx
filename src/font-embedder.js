@@ -74,14 +74,57 @@ export class PPTXEmbedFonts {
   }
 
   async updateFiles() {
+    // 1. Expand font slot JSON first so we can see the real typeface names in slides
+    await this.expandFontSlotJson();
+
+    // 2. Prune fonts that aren't actually referenced in the expanded XML.
+    //    detectFontsForPPTX may normalize font names (e.g. "PingFang SC" → "Microsoft YaHei"),
+    //    so the DOM-scanned name may not appear in the final XML. Embedding unreferenced fonts
+    //    wastes bytes and causes panose/pitchFamily mismatches.
+    await this._pruneUnreferencedFonts();
+
+    // 3. Write the (pruned) font data into the PPTX structure
     await this.updateContentTypesXML();
     await this.updatePresentationXML();
     await this.updateRelsPresentationXML();
     this.updateFontFiles();
-    // Expand font slot JSON typeface values BEFORE adding panose/pitchFamily/charset,
-    // so that updateSlidesFontRefs can match the real font names instead of JSON strings.
-    await this.expandFontSlotJson();
+
+    // 4. Inject panose/pitchFamily/charset into slide font refs
     await this.updateSlidesFontRefs();
+  }
+
+  /**
+   * Remove fonts from this.fonts that aren't referenced by any typeface attribute
+   * in the expanded slide XML. This handles the case where detectFontsForPPTX
+   * normalized a font name (e.g. "Noto Sans CJK SC" → "Microsoft YaHei") —
+   * the original name no longer appears in the XML, so embedding it is wasted.
+   */
+  async _pruneUnreferencedFonts() {
+    if (this.fonts.length === 0) return;
+
+    // Collect all typeface values from expanded slide XML
+    const usedTypefaces = new Set();
+    const slideFiles = Object.keys(this.zip.files).filter(
+      (f) => f.startsWith('ppt/slides/slide') && f.endsWith('.xml')
+    );
+    for (const path of slideFiles) {
+      const file = this.zip.file(path);
+      if (!file) continue;
+      const xml = await file.async('string');
+      // Match typeface="..." on font slot elements (a:latin, a:ea, a:cs, a:sym)
+      const re = /<a:(?:latin|ea|cs|sym)\s+typeface="([^"]+)"/g;
+      let m;
+      while ((m = re.exec(xml)) !== null) {
+        usedTypefaces.add(m[1]);
+      }
+    }
+
+    const before = this.fonts.length;
+    this.fonts = this.fonts.filter((f) => usedTypefaces.has(f.name));
+    const pruned = before - this.fonts.length;
+    if (pruned > 0) {
+      console.log(`Pruned ${pruned} unreferenced embedded font(s)`);
+    }
   }
 
   /**
@@ -104,6 +147,14 @@ export class PPTXEmbedFonts {
         this.zip.file(path, result.xml);
       }
     }
+  }
+
+  /**
+   * Get the names of fonts that were actually embedded (after pruning).
+   * Use this for the postProcessFontSlots embeddedFontNames option.
+   */
+  getEmbeddedFontNames() {
+    return this.fonts.map((f) => f.name);
   }
 
   async generateBlob() {
